@@ -98,14 +98,7 @@ Automated installation scripts are provided in the `python_env_installation/` fo
 
 Designed for the CESVIMA cluster at UPM. It links against the cluster's existing MPI, OpenBLAS, ScaLAPACK, and MUMPS modules (`foss/2021a` toolchain) rather than downloading them, and applies the necessary `libgfortran` path fix for the GCCcore 7.2.0 runtime.
 
-Before running, load the required modules:
-
-```bash
-module load foss/2021a
-module load MUMPS/5.4.0-foss-2021a-metis
-```
-
-Then, from the root of the repository:
+From the root of the repository:
 
 ```bash
 cd python_env_installation
@@ -139,9 +132,9 @@ A sanity check is run automatically at the end of each script, printing the PETS
 
 ## Usage
 
-### Global stability analysis (`EIGENVAL.py`)
+### Global stability analysis (`eig.py`)
 
-Edit the parameter block at the top of `EIGENVAL.py`:
+Edit the parameter block at the top of `eig.py`:
 
 ```python
 jacfile   = 'JAC/samg.matrix.amg.pval'
@@ -154,12 +147,12 @@ adjoint   = False       # set True for adjoint problem
 Submit via SLURM:
 
 ```bash
-mpirun -np 8 python EIGENVAL.py
+mpirun -np 8 python eig.py
 ```
 
 Converged eigenvalues are appended to `RESULTS_eig/eigv_DIR.dat` (or `eigv_ADJ.dat`). Eigenvectors are written as `RESULTS_eig/eigf_N.pval`. Duplicate detection across restarts is built in.
 
-### Resolvent analysis (`RESOLVANT.py`)
+### Resolvent analysis (`resolvent.py`)
 
 Edit the parameter block:
 
@@ -172,7 +165,7 @@ nev        = 30                   # number of singular values requested
 Submit via SLURM:
 
 ```bash
-mpirun -np 8 python RESOLVANT.py
+mpirun -np 8 python resolvent.py
 ```
 
 Optimal forcing/response modes are written to `RESULTS_resolvent/` for each frequency.
