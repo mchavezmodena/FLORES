@@ -1,11 +1,10 @@
-# FLORES
+# FLORES: Flow Linear Operators: Resolvent and Eigenvalue Stability
 
 MIT License
 
-Copyright (c) 2021 NUMATH https://numath.dmae.upm.es
+Copyright (c) 2026 NUMATH https://numath.dmae.upm.es
 
-
-## Flow Linear Operators: Resolvent and Eigenvalue Stability
+## Introduction
 
 **FLORES** is a parallel Python toolkit for global stability analysis and resolvent-based input–output analysis of compressible flows. It computes eigenvalues, eigenmodes, and optimal forcing/response modes using PETSc/SLEPc and the MUMPS direct solver, and is designed to run on HPC clusters via MPI.
 
@@ -75,17 +74,17 @@ which is solved with SLEPc. A single LU factorisation of `(iω B − A)` via MUM
 
 ```
 FLORES/
-├── solver/
-    ├── eig_simple.py          # Global stability solver (direct & adjoint)
-    ├── resolvent.py         # Resolvent operator solver (matrix-free shell)
-    ├── jac_red.py           # Domain-reduction utilities
-    ├── save2pval.py         # Output routines (eigenvector → .pval files)
-    ├── input_output.py      # Jacobian and coordinate readers
-├── python_env_installation # Scripts to install the python environment
-├── JAC/                 # Input directory for jacobian matrices
-├── RESULTS_eig/         # Output directory for eigenvalue runs
-├── RESULTS_resolvent/   # Output directory for resolvent runs
-└── README.md
+    ├── solver/
+        ├── eig_simple.py            # Global stability solver (direct & adjoint)
+        ├── resolvent.py             # Resolvent operator solver (matrix-free shell)
+        ├── jac_red.py               # Domain-reduction utilities
+        ├── save2pval.py             # Output routines (eigenvector → .pval files)
+        ├── input_output.py          # Jacobian and coordinate readers
+    ├── python_env_installation      #  Scripts to install the python environment
+    ├── JAC/                         # Input directory for jacobian matrices
+    ├── RESULTS_eig/                 # Output directory for eigenvalue runs
+    ├── RESULTS_resolvent/           # Output directory for resolvent runs
+    └── README.md
 ```
 
 ---
@@ -145,8 +144,8 @@ A sanity check is run automatically at the end of each script, printing the PETS
 Edit the parameter block at the top of `EIGENVAL.py`:
 
 ```python
-jacfile   = 'path/to/samg.matrix.amg.pval'
-volfile   = 'path/to/samg.matrix.vol'
+jacfile   = 'JAC/samg.matrix.amg.pval'
+volfile   = 'JAC/samg.matrix.vol'
 nev       = 50          # number of eigenvalues requested
 the_shift = -0.05 + 4j  # shift in the complex plane
 adjoint   = False       # set True for adjoint problem
@@ -165,7 +164,7 @@ Converged eigenvalues are appended to `RESULTS_eig/eigv_DIR.dat` (or `eigv_ADJ.d
 Edit the parameter block:
 
 ```python
-jacfile    = 'path/to/samg.matrix.amg.pval'
+jacfile    = 'JAC/samg.matrix.amg.pval'
 listomegas = [57.2j, 60j, 80j]   # list of frequencies ω to sweep
 nev        = 30                   # number of singular values requested
 ```
@@ -180,25 +179,13 @@ Optimal forcing/response modes are written to `RESULTS_resolvent/` for each freq
 
 ---
 
-## Test Case: Backward-Facing Step
 
-The default paths point to a backward-facing step (BFS) configuration located at
-
-```
-/projects/07_TRANSDIFFUSE/02_BFS/JAC/
-```
-
-This case uses:
-- Mach number `M = 0.1`
-- Spanwise wavenumber `β = 0`
-- Target shift `σ = −0.05 + 4i` for the eigenvalue solver
-- Frequency sweep `ω = 57.2i` for the resolvent solver
-
----
 
 ## Authors & Acknowledgements
 
-**Development:** Miguel Chávez, Iván Padilla,  (UPM / TRANSDIFFUSE project)
+Copyright (c) 2026 NUMATH https://numath.dmae.upm.es
+
+**Development:** Alejandro Martinez-Cava, Iván Padilla, Miguel Chávez-Modena, 
 
 **Original implementation:** The resolvent and eigenvalue solver architecture is based on the original code developed by **Alejandro Martínez Cava** as part of his doctoral thesis at the Universidad Politécnica de Madrid (UPM). His foundational work on the matrix-free resolvent operator and the PETSc/SLEPc solver infrastructure made this tool possible. Martínez-Cava Aguilar, Alejandro  (2019). Direct and Adjoint Methods for Highly Detached Flows. Tesis (Doctoral), E.T.S. de Ingeniería Aeronáutica y del Espacio (UPM). https://doi.org/10.20868/UPM.thesis.56391. 
 
