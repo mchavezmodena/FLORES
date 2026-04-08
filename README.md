@@ -1,4 +1,10 @@
 # FLORES
+
+MIT License
+
+Copyright (c) 2021 NUMATH https://numath.dmae.upm.es
+
+
 ## Flow Linear Operators: Resolvent and Eigenvalue Stability
 
 **FLORES** is a parallel Python toolkit for global stability analysis and resolvent-based input–output analysis of compressible flows. It computes eigenvalues, eigenmodes, and optimal forcing/response modes using PETSc/SLEPc and the MUMPS direct solver, and is designed to run on HPC clusters via MPI.
@@ -199,10 +205,6 @@ This case uses:
 This work is part of the **TRANSDIFFUSE** project at UPM.
 
 ---
-
-## License
-
-This project is licensed under the **MIT License**.
 
 ```
 MIT License
