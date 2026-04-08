@@ -93,53 +93,48 @@ FLORES/
 ## Dependencies & Installation
 
 
+Automated installation scripts are provided in the `python_env_installation/` folder. They handle everything: virtual environment creation, PETSc/SLEPc compilation (inplace, no `make install`), and the installation of `mpi4py`, `petsc4py`, `slepc4py`, and all extra Python dependencies. Both scripts include checkpoint logic, so they can be safely re-run if interrupted.
 
-### Cluster module stack (tested configuration)
+### `Cesvima_UPM_Installation.sh` — HPC cluster (CESVIMA / UPM)
+
+Designed for the CESVIMA cluster at UPM. It links against the cluster's existing MPI, OpenBLAS, ScaLAPACK, and MUMPS modules (`foss/2021a` toolchain) rather than downloading them, and applies the necessary `libgfortran` path fix for the GCCcore 7.2.0 runtime.
+
+Before running, load the required modules:
 
 ```bash
-module load foss/2021a                       # OpenMPI 4.1.1, OpenBLAS, ScaLAPACK
+module load foss/2021a
 module load MUMPS/5.4.0-foss-2021a-metis
 ```
 
-### PETSc / SLEPc (version 3.25.0, inplace build)
+Then, from the root of the repository:
 
 ```bash
-# Configure — use the cluster MPI, not downloaded MPICH
-./configure \
-    --with-mpi-dir=$EBROOTOPENMPI \
-    --download-cmake \
-    --download-metis \
-    --download-parmetis \
-    --with-scalar-type=complex \
-    --with-precision=double \
-    PETSC_ARCH=arch-complex
-
-make PETSC_DIR=$(pwd) PETSC_ARCH=arch-complex all
+cd python_env_installation
+bash Cesvima_UPM_Installation.sh
 ```
 
-> **Note:** Do not run `make install`. FLORES uses the inplace build directory.
+> **Important:** Submit this script as a SLURM job — do not run it on the login node. PETSc/SLEPc compilation and the `petsc4py`/`slepc4py` builds are memory-intensive and will be killed by the login node's OOM policy.
 
-### Python packages
+### `Ubuntu_Installation.sh` — Local Ubuntu workstation
+
+Designed for a standard Ubuntu desktop or laptop. It downloads and compiles all dependencies from scratch (MPICH, BLAS/LAPACK, ScaLAPACK, MUMPS, CMake, METIS, ParMETIS), so no pre-installed MPI or system libraries are required beyond a working C/Fortran compiler.
+
+From the root of the repository:
 
 ```bash
-pip install mpi4py --break-system-packages
-
-# petsc4py and slepc4py must exactly match the compiled PETSc/SLEPc version
-CFLAGS="-O0 -g0" MAX_JOBS=1 pip install petsc4py==3.25.0 --break-system-packages
-CFLAGS="-O0 -g0" MAX_JOBS=1 pip install slepc4py==3.25.0 --break-system-packages
-
-pip install numpy scipy netCDF4 --break-system-packages
+cd python_env_installation
+bash Ubuntu_Installation.sh
 ```
 
-> **Important:** Compile petsc4py/slepc4py as a SLURM job, not on the login node, to avoid out-of-memory kills.
+### After installation (both platforms)
 
-### Environment variables
+Both scripts patch the virtual environment's `activate` script with the correct `PETSC_DIR`, `SLEPC_DIR`, `PETSC_ARCH`, and `LD_LIBRARY_PATH` variables. To activate the environment in future sessions:
 
 ```bash
-export PETSC_DIR=/path/to/petsc
-export PETSC_ARCH=arch-complex
-export SLEPC_DIR=/path/to/slepc
+source myvenv/bin/activate
 ```
+
+A sanity check is run automatically at the end of each script, printing the PETSc and SLEPc versions and verifying MPI communication.
 
 ---
 
