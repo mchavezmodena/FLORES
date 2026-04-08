@@ -75,11 +75,14 @@ which is solved with SLEPc. A single LU factorisation of `(iω B − A)` via MUM
 
 ```
 FLORES/
-├── EIGENVAL.py          # Global stability solver (direct & adjoint)
-├── RESOLVANT.py         # Resolvent operator solver (matrix-free shell)
-├── jac_red.py           # Domain-reduction utilities
-├── save2pval.py         # Output routines (eigenvector → .pval files)
-├── input_output.py      # Jacobian and coordinate readers
+├── solver/
+    ├── eig_simple.py          # Global stability solver (direct & adjoint)
+    ├── resolvent.py         # Resolvent operator solver (matrix-free shell)
+    ├── jac_red.py           # Domain-reduction utilities
+    ├── save2pval.py         # Output routines (eigenvector → .pval files)
+    ├── input_output.py      # Jacobian and coordinate readers
+├── python_env_installation # Scripts to install the python environment
+├── JAC/                 # Input directory for jacobian matrices
 ├── RESULTS_eig/         # Output directory for eigenvalue runs
 ├── RESULTS_resolvent/   # Output directory for resolvent runs
 └── README.md
@@ -88,6 +91,8 @@ FLORES/
 ---
 
 ## Dependencies & Installation
+
+
 
 ### Cluster module stack (tested configuration)
 
