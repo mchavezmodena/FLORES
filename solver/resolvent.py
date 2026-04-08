@@ -53,7 +53,7 @@ class resolvant(object):
     def mult(self, mat, x, y):
         """ y <- A * x """
 #        print ('mult')
-        Print = PETSc.Sys.Print
+        print = PETSc.Sys.print
         
 #        self.ksp.solve(x,y)
         pass
@@ -82,7 +82,7 @@ class resolvant(object):
 
         # 6. PT * M^-1 * (C*)^-1 * Q * C^-1 * P * fs
         self.P.multTranspose(v1, y)
-        # Print( ' Succesfull calls to MatMul = {0}'.format(self.iter) )
+        # print( ' Succesfull calls to MatMul = {0}'.format(self.iter) )
         self.iter += 1
         v1.destroy()
         v2.destroy()
@@ -95,19 +95,19 @@ class resolvant(object):
         ## CREATE THE KSP OBJECT FOR THE RESOLVANT OPERATOR
         ###################
         """
-        Print = PETSc.Sys.Print
-        Print(' w = {0}'.format(w))
+        print = PETSc.Sys.print
+        print(' w = {0}'.format(w))
         self.J.scale(-1.0)
         self.J.shift(w)
         self.ksp = PETSc.KSP().create()
         self.ksp.setOperators(self.J)
         self.ksp.setFromOptions()
         tol = 1e-7
-        Print ('')
-        Print (' ******************************************')
-        Print ('  Performing LU decomposition...')
-        Print (' ******************************************')
-        Print ('')
+        print('')
+        print(' ******************************************')
+        print('  Performing LU decomposition...')
+        print(' ******************************************')
+        print('')
         ## LU options ##
         self.ksp.setType('preonly')
         pc = self.ksp.getPC()
@@ -130,9 +130,9 @@ class resolvant(object):
         comm = MPI.COMM_WORLD
         size = comm.Get_size()
         rank = comm.Get_rank()
-        Print = PETSc.Sys.Print
+        print = PETSc.Sys.print
         dimrows = self.N
-        dimcol = 2*dimrows/neq
+        dimcol = 2*dimrows//neq
 
         irn = np.zeros(dimcol)
         jcn = np.zeros(dimcol)
@@ -166,13 +166,13 @@ class resolvant(object):
         nnz_start = nnz_count[RowStart]
         nnz_end = nnz_count[RowEnd]
         row_proc = [(ppy.indptr[RowStart+i] - ppy.indptr[RowStart])
-                        for i in xrange(nrows+1)]
+                        for i in range(nrows+1)]
         row_proc[0] = 0
         nnzproc = 0
         nnzproc = nnz_end - nnz_start
         col_proc = ppy.indices[nnz_start:nnz_end]
         val_proc = ppy.data[nnz_start:nnz_end]
-        Print (' Assembling PETSc matrix...')
+        print(' Assembling PETSc matrix...')
         self.P.setPreallocationCSR((row_proc, col_proc, val_proc))
         self.P.assemble()
         # self.PT = self.P.duplicate(copy=True)
@@ -185,55 +185,59 @@ def run_slices():
     comm = MPI.COMM_WORLD
     size = comm.Get_size()
     rank = comm.Get_rank()
-    Print = PETSc.Sys.Print
+    print = PETSc.Sys.print
+
+
+    # Path to the Jacobian and volumes files (if gen = False, the volumes file is not needed, as the Jacobian is already scaled by the cell volumes)
+    input_file_path = '/home/w059/w059589/projects/07_TRANSDIFFUSE/02_BFS/JAC/'
 
     #######################
-    jacfile = './DATA/samg.matrix.amg.pval'
-    qemfile = './DATA/qematrix.pval'
+    jacfile = input_file_path + 'samg.matrix.amg.pval'
+    qemfile = input_file_path + 'qematrix.pval'
     #######################
-    beta = 0
+    beta = 0 
     nslices = 7
     omega = 0.1j
     #######################
-    mach = 0.3
+    mach = 0.1 # Mach number
     rlength = 1.0
     #######################
-    dreduced = True
+    dreduced = False # Reduce the domain to a box defined by xmin/xmax and zmin/zmax
     xmin = -0.4
     xmax = 1
     zmin = 0
     zmax = 0.5
     #######################
-    nev = 15
+    nev = 30
     adjoint = False
     the_shift = 0
     #######################
 
-    if ( os.path.isdir('./RESULTS') ):
+    if ( os.path.isdir('./RESULTS_resolvent') ):
         pass
     else:
-        os.mkdir('./RESULTS')
+        os.mkdir('./RESULTS_resolvent')
 
     if (rank==0):
-        Print('')
-        Print(' Reading Jacobian from {0}'.format(jacfile))
+        print('')
+        print(' Reading Jacobian from {0}'.format(jacfile))
         mjac, neq = openjacobian(jacfile)
-        Print(' Reading Qe Matrix from {0}'.format(qemfile))
-        Print('')
+        print(' Reading Qe Matrix from {0}'.format(qemfile))
+        print('')
         # qematrix, foo = openqe(qemfile)
         nvars = mjac.shape[0]
-        Print(' Matrix main dimension = {0}'.format(nvars) )
-        Print(' Number of equations = {0}'.format(neq))
-        Print('')
+        print(' Matrix main dimension = {0}'.format(nvars) )
+        print(' Number of equations = {0}'.format(neq))
+        print('')
 
         if (beta==0):
             amatrix = mjac
         else:
-            nvars /= nslices
-            Print(' J0 block main dimension = {0}'.format(nvars) )
+            nvars //= nslices
+            print(' J0 block main dimension = {0}'.format(nvars) )
             Ly = 1
 
-            Print('Extracting and compacting Jacobian')
+            print('Extracting and compacting Jacobian')
             midrow = mjac[nvars*3:nvars*4,:]
             midrow = midrow.tocsc()
 
@@ -249,70 +253,67 @@ def run_slices():
             nj1  = midrow[:,nvars*4:nvars*5]
 
             error = nj0 - j0
-            Print(' J0 error = {0}'.format( str( np.max(error.data) ) ) )
+            print(' J0 error = {0}'.format( str( np.max(error.data) ) ) )
 
             error = njm1 - jm1
-            Print(' J1 error = {0}'.format( str( np.max(error.data) ) ) )
+            print(' J1 error = {0}'.format( str( np.max(error.data) ) ) )
             # sys.exit()
             amatrix = j0 + j1*np.exp(1j*beta*Ly) - j1*np.exp(-1j*beta*Ly)
 
-            Print (' max(A - J0) = {0}'.format( np.max(amatrix-j0) ) )
+            print(' max(A - J0) = {0}'.format( np.max(amatrix-j0) ) )
 
             amatrix = amatrix.tocsr()
 
         n = amatrix.shape[0]
+        
+        print('size of A matrix = {0}'.format(n))
         if (n!=nvars):
             sys.exit('N != NVARS... something went very wrong!')
-        gridpoints = n/neq
+        gridpoints = n//neq
 
         ## READING MASS MATRIX AND STORE IT IN SPARSE FORMAT ##
-        Print (' Reading mass matrix and generating M and Inv(M)')
-        Print ('')
+        print(' Reading mass matrix and generating M and Inv(M)')
+        print('')
         one = 1. + 0j
-        with open('./DATA/samg.matrix.vol', 'r') as f:
+        with open(input_file_path + 'samg.matrix.vol', 'r') as f:
             vols = f.readlines()
             vols = [float(line) for line in vols]
         bmatrix = identity(n, dtype='c16', format='csr')  # Matrix M
         mmatinv = identity(n, dtype='c16', format='csr')  # Matrix Inv(M)
-        bmatrix.data[:] = [vols[i/neq]*one for i in xrange(n)]
-        # print bmatrix[0:80]
-        mmatinv.data[:] = [1.0/vols[i/neq] for i in xrange(n)]
-        
-        with open('./DATA/newvols.dat', 'r') as f:
-            vols = f.readlines()
-            vols = [float(line) for line in vols]
-        qematrix = identity(n, dtype='c16', format='csr')  # Matrix Qe
-        qematrix.data[:] = [vols[i/neq]*one for i in xrange(n)]
+        qematrix = identity(n, dtype='c16', format='csr')  # Matrix Qe (same volumes as B)
+        bmatrix.data[:] = [vols[i//neq]*one for i in range(n)]
+        mmatinv.data[:] = [1.0/vols[i//neq] for i in range(n)]
+        qematrix.data[:] = [vols[i//neq]*one for i in range(n)]
         
 
 
         ###### DOMAIN REDUCTION #####
         if (dreduced==True):
-            Print('')
-            Print(' Applying domain reduction')
-            Print(' XMIN/XMAX = {0}/{1}'.format(xmin,xmax))
-            Print(' ZMIN/ZMAX = {0}/{1}'.format(zmin,zmax))
+            print('')
+            print(' Applying domain reduction')
+            print(' XMIN/XMAX = {0}/{1}'.format(xmin,xmax))
+            print(' ZMIN/ZMAX = {0}/{1}'.format(zmin,zmax))
             # 1. Read coordinates from file
             coord = read_coordinates('coord.dat', rlength, beta)
             # 2. Generate the permutation matrix
             dr = domain_reduction(zmin, zmax, xmin, xmax)
             dr.create_Pmatrix(coord)
             # 3. Reorder and slice the jacobian and volumes matrix
-            Print(' Previous number of NNZ elem = {0}'.format(amatrix.nnz))
+            print(' Previous number of NNZ elem = {0}'.format(amatrix.nnz))
             amatrix = dr.reduce_matrix(amatrix)
-            Print(' New number of NNZ elem = {0}'.format(amatrix.nnz))
+            print(' New number of NNZ elem = {0}'.format(amatrix.nnz))
             bmatrix = dr.reduce_matrix(bmatrix)
             qematrix = dr.reduce_matrix(qematrix)
             mmatinv = dr.reduce_matrix(mmatinv)
             n = amatrix.shape[0]
-            Print(' New leading dimension of A Matrix = {0}'.format(n))
+            print(' New leading dimension of A Matrix = {0}'.format(n))
             # 5. Generate a local_id vector, reorder and slice it
             #    (this will be needed for output indexing)
             localid = np.arange(0, gridpoints, 1, dtype='i4')
             localid = np.repeat(localid, neq)
             rgid = dr.reduce_vector(localid)
             rgid = rgid[0::neq].astype(int)
-            Print('')
+            print('')
         else:
             rgid = None
 
@@ -354,38 +355,18 @@ def run_slices():
     nnz_start = nnz_count[RowStart]
     nnz_end = nnz_count[RowEnd]
     row_proc = [(amatrix.indptr[RowStart+i] - amatrix.indptr[RowStart])
-                    for i in xrange(nrows+1)]
+                    for i in range(nrows+1)]
     row_proc[0] = 0
     nnzproc = 0
     nnzproc = nnz_end - nnz_start
     col_proc = amatrix.indices[nnz_start:nnz_end]
     val_proc = amatrix.data[nnz_start:nnz_end]
-    Print (' Assembling A PETSc matrix...')
+    print(' Assembling A PETSc matrix...')
     A.setPreallocationCSR((row_proc, col_proc, val_proc))
     A.assemble()
     ## TAU Matrix Scaling
     fac = 1. / (mach*np.sqrt(1.4))
     A.scale(fac)
-
-#    A.shift(50j)
-    # U, V = A.getVecs()
-    # S = SLEPc.SVD().create()
-    # S.setOperator(A)
-    # S.solve()
-    # nconv = S.getConverged()
-    # Print("")
-    # Print("           k           ||Ax-kx||/||kx|| ")
-    # Print("--------------------- ------------------")
-    # for i in range(nconv):
-    #     k = S.getSingularTriplet(i, U, V)
-    #     # eigs.append(k)
-    #     error = S.computeError(i)
-    #     if k.imag != 0.0:
-    #       Print(" %9f%+9f j    %12g" % (k.real, k.imag, error))
-    #     else:
-    #       Print(" %12f         %12g" % (k.real, error))
-    #
-    # sys.exit()
 
     # Freeing memory
     col_proc = None
@@ -402,9 +383,9 @@ def run_slices():
     elif (size>1):
         B.setType('mpiaij')
     RowStart, RowEnd = B.getOwnershipRange()
-    for pt in xrange(RowStart, RowEnd):
+    for pt in range(RowStart, RowEnd):
         B[pt,pt] = bmatrix.data[pt]
-    Print (' Assembling B PETSc matrix...')
+    print(' Assembling B PETSc matrix...')
     B.assemble()
 
     Binv = PETSc.Mat()
@@ -416,9 +397,9 @@ def run_slices():
     elif (size>1):
         Binv.setType('mpiaij')
     RowStart, RowEnd = Binv.getOwnershipRange()
-    for pt in xrange(RowStart, RowEnd):
+    for pt in range(RowStart, RowEnd):
         Binv[pt,pt] = mmatinv.data[pt]
-    Print (' Assembling Binv PETSc matrix...')
+    print(' Assembling Binv PETSc matrix...')
     Binv.assemble()
 
     #################### QE MATRIX ######################
@@ -431,9 +412,9 @@ def run_slices():
     elif (size>1):
         Q.setType('mpiaij')
 #    RowStart, RowEnd = Q.getOwnershipRange()
-#    for pt in xrange(RowStart, RowEnd):
+#    for pt in range(RowStart, RowEnd):
 #        Q[pt,pt] = qematrix.data[pt]
-#    Print (' Assembling Qe PETSc matrix...')
+#    print(' Assembling Qe PETSc matrix...')
 #    Q.assemble()
 
 #    ## Paralelizing algorithm
@@ -444,13 +425,13 @@ def run_slices():
     nnz_start = nnz_count[RowStart]
     nnz_end = nnz_count[RowEnd]
     row_proc = [(qematrix.indptr[RowStart+i] - qematrix.indptr[RowStart])
-                    for i in xrange(nrows+1)]
+                    for i in range(nrows+1)]
     row_proc[0] = 0
     nnzproc = 0
     nnzproc = nnz_end - nnz_start
     col_proc = qematrix.indices[nnz_start:nnz_end]
     val_proc = qematrix.data[nnz_start:nnz_end]
-    Print (' Assembling Q PETSc matrix...')
+    print(' Assembling Q PETSc matrix...')
     Q.setPreallocationCSR((row_proc, col_proc, val_proc))
     Q.assemble()
 
@@ -470,11 +451,11 @@ def run_slices():
     ncv = nev*3 + 1
     mpd = ncv-1
     listomegas = [57.2j] #,60j,70j,80j,90j,100j] #np.linspace(0.005, 100, 10)
-    Print (listomegas)
+    print(listomegas)
     for omega in listomegas:
         # setup linear system matrix
         R = PETSc.Mat().create()
-        R.setSizes([n/2, n/2])
+        R.setSizes([n//2, n//2])
 #        R.setSizes([n, n])
         R.setType('python')
         shell = resolvant(n=n, Minv=Binv, Qe=Q, J=A, w=omega, neq=neq) # shell context
@@ -484,23 +465,6 @@ def run_slices():
         E = SLEPc.EPS().create()
         E.setOperators(R)
         E.setProblemType( SLEPc.EPS.ProblemType.NHEP )
-
-        #############################
-        ## Spectral Tranformation
-        #############################
-#        ST = E.getST()
-#        st_type = 'shift'
-#        ST.setType('shell')
- 
-        ###############################
-        ## Preconditioner (LU) options
-        ###############################
-#        K = ST.getKSP()
-#        ksp_type = 'preonly'
-#        K.setType(ksp_type)
-#        K.setFromOptions()
-#        pc = K.getPC()
-#        pc.setType('none')
 
         ###################################
         ## Eigenvalue Solver Options
@@ -514,21 +478,18 @@ def run_slices():
         E.setFromOptions()
 
         if (rank==0):
-            print ''
-#            print ' TYPE OF KSP: ', K.getType()
-#            print ' ST Type = ', ST.getType()
-#            print ' ST Shift = ', ST.getShift()
-            print ' Target = ', E.getTarget()
-            print ' Resolvant OMEGA = ', omega
-            print ' EGV Solver = ', E.getType()
-            print ' Region of Spectrum = ', E.getWhichEigenpairs()
-            print ' Number of eigenvalues requested = ', nev
-            print ' Number of column vectors = ', ncv
-            print ' Maximum dimension of projected problem = ', mpd
-            print ''
+            print(' ')
+            print(' Target = ', E.getTarget())
+            print(' Resolvant OMEGA = ', omega)
+            print(' EGV Solver = ', E.getType())
+            print(' Region of Spectrum = ', E.getWhichEigenpairs())
+            print(' Number of eigenvalues requested = ', nev)
+            print(' Number of column vectors = ', ncv)
+            print(' Maximum dimension of projected problem = ', mpd)
+            print('')
         #------------------#
         shell.operator(omega)
-        Print(' SOLVING!\n')
+        print(' SOLVING!\n')
         E.solve()
         #------------------#
         #######################################
@@ -540,35 +501,31 @@ def run_slices():
         nconv = E.getConverged()
 
         if (rank==0):
-            print ''
-            print ' Number of iterations of the EPS method: ', its
-            print ' CRITERIA: tol= ', tol,', maxit= ',max_it
-            print ' Number of iterations of the ksp method: ', ksp_its
-            print ' Number of requested eigenvalues: ', nev
-            print ' Number of converged eigenvalues: ', nconv
+            print ('')
+            print(' Number of iterations of the EPS method: ', its)
+            print(' CRITERIA: tol= ', tol,', maxit= ',max_it)
+            print(' Number of iterations of the ksp method: ', ksp_its)
+            print(' Number of requested eigenvalues: ', nev)
+            print(' Number of converged eigenvalues: ', nconv)
 
-        # Create the results vectors
-#        xr, tmp = A.getVecs()
-#        xi, tmp = A.getVecs()
         xr, tmp = shell.P.getVecs()
         xi, tmp = shell.P.getVecs()
         eigpre, tmp = A.getVecs()
         eigs = []
         if nconv > 0:
-            Print("")
-            Print("           k           ||Ax-kx||/||kx|| ")
-            Print("--------------------- ------------------")
+            print("")
+            print("           k           ||Ax-kx||/||kx|| ")
+            print("--------------------- ------------------")
             for i in range(nconv):
                 k = E.getEigenpair(i, xr, xi)
-#                k = 1./k + listomegas[0]
                 eigs.append(k)
                 error = E.computeError(i)
                 if k.imag != 0.0:
-                    Print(" %9f%+9f j    %12g" % (k.real, k.imag, error))
+                    print(" %9f%+9f j    %12g" % (k.real, k.imag, error))
                 else:
-                    Print(" %12f         %12g" % (k.real, error))
+                    print(" %12f         %12g" % (k.real, error))
 
-                eigvecfile = './RESULTS/eigf_'+str(i)+'.pval'
+                eigvecfile = './RESULTS_resolvent/eigf_'+str(i)+'.pval'
                 shell.P.mult(xr,eigpre)
                 scatter, eigenvec = PETSc.Scatter.toZero(eigpre)
                 scatter.scatter(eigpre, eigenvec, False, PETSc.Scatter.Mode.FORWARD)
@@ -576,32 +533,28 @@ def run_slices():
                     mode2pval(eigvecfile, eigenvec, nvars, n, neq, beta, dreduced, rgid)
 
 
-            Print("")
+            print("")
 
         eigpre.destroy()
         xi.destroy()
         xr.destroy()
         R.destroy()
-        # B.destroy()
-        # A.destroy()
-        # Q.destroy()
-#        shell.P.destroy()
         E.destroy()
 
         if (rank==0):
             if(adjoint):
-                eigv_file = './RESULTS/eigv_ADJ.dat'
+                eigv_file = './RESULTS_resolvent/eigv_ADJ.dat'
             else:
-                eigv_file = './RESULTS/eigv_DIR_'+str(omega)+'.dat'
+                eigv_file = './RESULTS_resolvent/eigv_DIR_'+str(omega)+'.dat'
 
-            print ' Saving Eigenvalues in ' + eigv_file
+            print(' Saving Eigenvalues in ' + eigv_file)
             with open(eigv_file, 'w') as w:
                 for i in range(nconv):
                     w.write('{0:2d}   {1:12.8f}   {2:12.8f}\n'.format(i,
                                                                     eigs[i].real,
                                                                     eigs[i].imag))
-            print ' DONE'
-            print ''
+            print(' DONE')
+            print('')
 
 
 if __name__ == "__main__":
