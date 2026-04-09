@@ -332,8 +332,8 @@ def parse_args():
     p.add_argument('--cmap', default='coolwarm',
                    help='Matplotlib colourmap (default: coolwarm)')
 
-    p.add_argument('--clim', type=float, default=95,
-                   help='Percentile for colorbar range [0-100] (default: 95). '
+    p.add_argument('--clim', type=float, default=99,
+                   help='Percentile for colorbar range [0-100] (default: 99). '
                         'Lower values clip outliers and improve contrast.')
 
 
@@ -349,6 +349,89 @@ def parse_args():
                    help='Plot mesh nodes only (sanity check, no .pval needed)')
 
     return p.parse_args()
+
+
+
+def is_resolvent_dir(path):
+    """Return True if the directory name contains 'resolvent' (case-insensitive)."""
+    return 'resolvent' in os.path.basename(os.path.abspath(path)).lower()
+
+
+def plot_resolvent(x, y, forcing_data, response_data, cmap, output_stem,
+                   title_prefix, triang, clim_pct=99,
+                   plot_imag=False, plot_both=False):
+    """
+    Save one PNG per variable: eig_<i>_<varname>[_i|_ri].png
+    Layout: for each part (real/imag), forcing on top, response below.
+    """
+    if not forcing_data or not response_data:
+        print("  Nothing to plot.")
+        return
+
+    if plot_both:
+        parts  = [('Real', lambda c: c.real), ('Imag', lambda c: c.imag)]
+        suffix = '_ri'
+    elif plot_imag:
+        parts  = [('Imag', lambda c: c.imag)]
+        suffix = '_i'
+    else:
+        parts  = [('Real', lambda c: c.real)]
+        suffix = ''
+
+    # Output stem: replace eigf_ prefix with eig_ in the filename
+    stem_dir  = os.path.dirname(output_stem)
+    stem_base = os.path.basename(output_stem)          # e.g. "eigf_0"
+    stem_base = stem_base.replace('eigf_', 'eig_', 1)  # e.g. "eig_0"
+    out_stem  = os.path.join(stem_dir, stem_base)
+
+    # n_rows = 2 panels per part (forcing + response), times number of parts
+    n_rows = len(parts) * 2
+
+    for vname in forcing_data:
+        if vname not in response_data:
+            print(f"  [skip resolvent] '{vname}' not found in response file.")
+            continue
+
+        label   = LABELS.get(vname, vname)
+        f_cdata = forcing_data[vname]
+        r_cdata = response_data[vname]
+
+        fig, axes = plt.subplots(
+            n_rows, 1,
+            figsize=(14, 3.2 * n_rows),
+            constrained_layout=True,
+            squeeze=False,
+        )
+
+        row = 0
+        for part_label, extractor in parts:
+            for cdata, panel_title in [
+                    (f_cdata, f"Forcing  {part_label}  {label}"),
+                    (r_cdata, f"Response  {part_label}  {label}")]:
+                ax   = axes[row, 0]
+                arr  = extractor(cdata)
+                norm = symmetric_norm(arr, pct=clim_pct)
+
+                im = ax.tripcolor(triang, arr, cmap=cmap, norm=norm,
+                                  shading="gouraud", rasterized=True)
+                ax.set_xlim(*XLIM)
+
+                cb = fig.colorbar(im, ax=ax, orientation="horizontal",
+                                  pad=0.15, fraction=0.03, aspect=50)
+                cb.ax.tick_params(labelsize=8)
+                ax.set_title(panel_title, fontsize=11, loc="left")
+                ax.set_xlabel("x", fontsize=9)
+                ax.set_ylabel("y", fontsize=9)
+                ax.set_aspect("equal", adjustable="box")
+                ax.tick_params(labelsize=8)
+                row += 1
+
+        fig.suptitle(f"{title_prefix}  —  {label}", fontsize=13, fontweight="bold")
+
+        out = f"{out_stem}_{vname}{suffix}.png"
+        fig.savefig(out, dpi=150, bbox_inches="tight")
+        print(f"  Saved: {out}")
+        plt.close(fig)
 
 
 def main():
@@ -368,15 +451,12 @@ def main():
         print("Done.\n")
         return
 
-    # ── 3. build triangulation (once for all modes) ─────────────────────────
-    print(f"\n── Preparing renderer ──────────────────────────────────────────")
-    triang_grid = build_triangulation(x, y)
+    # ── 3. detect resolvent directory ─────────────────────────────────────────
+    resolvent = is_resolvent_dir(args.dir)
+    if resolvent:
+        print(f"  Resolvent directory detected — plotting forcing + response pairs.")
 
-    # ── 4. build triangulation (cached, rebuilt only if coords are truncated) ───
-    triang_cache      = build_triangulation(x, y)
-    triang_cache_size = len(x)
-
-    # ── 5. build list of pval files ────────────────────────────────────────────
+    # ── 4. build list of pval files (always forcing: eigf_*) ──────────────────
     if args.modes is not None:
         indices    = parse_mode_indices(args.modes)
         pval_files = [os.path.join(args.dir, f'eigf_{i}.pval') for i in indices]
@@ -385,45 +465,71 @@ def main():
     else:
         sys.exit("ERROR: provide a .pval file or use --modes.")
 
-    # ── 6. process each file ───────────────────────────────────────────────────
+    # ── 5. process each file ───────────────────────────────────────────────────
+    cached_triang  = None
+    cached_n_nodes = None
+
     for pval_path in pval_files:
         if not os.path.isfile(pval_path):
             print(f"\n  [skip] File not found: '{pval_path}'")
             continue
 
-        print(f"\n── Reading .pval file ──────────────────────────────────────────")
-        gridpoints, mode_data = read_pval(pval_path, args.vars)
+        # For resolvent: derive the response path
+        if resolvent:
+            resp_path = pval_path.replace('eigf_', 'eigr_')
+            if not os.path.isfile(resp_path):
+                print(f"\n  [skip] Response file not found: '{resp_path}'")
+                continue
 
-        if not mode_data:
+        print(f"\n── Reading forcing file ────────────────────────────────────────")
+        gridpoints, forc_data = read_pval(pval_path, args.vars)
+        if not forc_data:
             print(f"  [skip] No data loaded from '{pval_path}'.")
             continue
 
-        # size consistency — rebuild triangulation only when node count changes
+        if resolvent:
+            print(f"\n── Reading response file ───────────────────────────────────────")
+            _, resp_data = read_pval(resp_path, args.vars)
+
+        # size consistency
         n_coords = len(x)
         if n_coords != gridpoints:
             print(f"\n  WARNING: coord nodes ({n_coords}) ≠ pval gridpoints ({gridpoints}).")
             common = min(n_coords, gridpoints)
             print(f"  Truncating to {common} nodes.")
             xi = x[:common];  yi = y[:common]
-            mode_data = {k: v[:common] for k, v in mode_data.items()}
+            forc_data = {k: v[:common] for k, v in forc_data.items()}
+            if resolvent:
+                resp_data = {k: v[:common] for k, v in resp_data.items()}
         else:
             xi, yi = x, y
             common = n_coords
 
-        if common != triang_cache_size:
-            print(f"  Node count changed ({triang_cache_size} → {common}), rebuilding triangulation …")
-            triang_cache      = build_triangulation(xi, yi)
-            triang_cache_size = common
+        # Rebuild triangulation only when node count changes
+        if cached_n_nodes != common:
+            print(f"  Building triangulation for {common} nodes …")
+            cached_triang  = build_triangulation(xi, yi)
+            cached_n_nodes = common
+        else:
+            print(f"  Reusing cached triangulation ({common} nodes).")
 
         title       = args.title if args.title else os.path.basename(pval_path)
         output_stem = os.path.splitext(os.path.abspath(pval_path))[0]
 
         print(f"\n── Plotting ────────────────────────────────────────────────────")
-        plot_modes(xi, yi, mode_data, args.cmap, output_stem, title,
-                   triang=triang_cache,
-                   clim_pct=args.clim,
-                   plot_imag=args.imag,
-                   plot_both=args.both)
+        if resolvent:
+            plot_resolvent(xi, yi, forc_data, resp_data, args.cmap,
+                           output_stem, title,
+                           triang=cached_triang,
+                           clim_pct=args.clim,
+                           plot_imag=args.imag,
+                           plot_both=args.both)
+        else:
+            plot_modes(xi, yi, forc_data, args.cmap, output_stem, title,
+                       triang=cached_triang,
+                       clim_pct=args.clim,
+                       plot_imag=args.imag,
+                       plot_both=args.both)
 
     print("Done.\n")
 
