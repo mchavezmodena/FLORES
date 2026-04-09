@@ -105,13 +105,13 @@ def plot_eigenvalues(datasets, figsize=(13, 10), dpi=150,
     ax.set_xlim(all_im.min() - pad_x, all_im.max() + pad_x)
     ax.set_ylim(all_re.max() + pad_y, all_re.min() - pad_y)  # Y invertido
 
-    ax.set_xlabel("Im(λ)", fontsize=16, labelpad=10)
-    ax.set_ylabel("Re(λ)", fontsize=16, labelpad=10)
+    ax.set_xlabel("Im(λ)", fontsize=20, labelpad=10)
+    ax.set_ylabel("Re(λ)", fontsize=20, labelpad=10)
     ax.tick_params(axis="both", labelsize=13)
     ax.grid(True)
 
     if len(datasets) > 1:
-        ax.legend(fontsize=11, framealpha=0.9, edgecolor=GRID_COLOR, loc="best")
+        ax.legend(fontsize=20, framealpha=0.9, edgecolor=GRID_COLOR, loc="upper right")
 
     # Nombre de salida
     if len(datasets) == 1:

@@ -7,28 +7,31 @@ eigenmode components on the 2D computational domain.
 
 Coordinate file (default: JAC/samg.matrix.coo)
   Line 1  :  npoints_total   ndim
-  Lines 2+:  x   y   (one row per DOF, neq rows per mesh node → identical coords)
-  → unique grid nodes = npoints_total // neq
+  Lines 2+:  x   y   (one row per DOF, neq rows per mesh node -> identical coords)
+  -> unique grid nodes = npoints_total // neq
 
 Usage examples
 --------------
-# Default coords path, all 4 variables
-python plot_pval_mode.py mode_001.pval
+# Default: real part only, modes 0-9
+python plot_pval_mode.py --modes 0-9 --dir eig_results/
 
-# Sanity-check: load coords and show mesh only (no pval needed)
+# Single mode
+python plot_pval_mode.py --modes 2 --dir eig_results/
+
+# Explicit list
+python plot_pval_mode.py --modes 0 2 5 --dir eig_results/
+
+# Also plot imaginary part (separate file per variable)
+python plot_pval_mode.py --modes 0-9 --dir eig_results/ --imag
+
+# Both parts in the same figure (2 panels)
+python plot_pval_mode.py --modes 0-9 --dir eig_results/ --both
+
+# Sanity-check mesh only
 python plot_pval_mode.py --check-mesh
 
-# Custom coords path or neq
-python plot_pval_mode.py mode_001.pval --coords path/to/samg.matrix.coo --neq 4
-
-# Only u and w, save to PDF
-python plot_pval_mode.py mode_001.pval --vars u w --output mode.pdf
-
-# neq=5 (SA turbulence model)
-python plot_pval_mode.py mode_001.pval --neq 5 --vars rho u w e turb1
-
-# Scatter plot (faster for very large meshes, skips triangulation)
-python plot_pval_mode.py mode_001.pval --scatter
+# Single .pval file
+python plot_pval_mode.py eigf_0.pval
 """
 
 import argparse
@@ -43,6 +46,7 @@ from netCDF4 import Dataset
 # ── defaults ───────────────────────────────────────────────────────────────────
 
 DEFAULT_COORDS = 'JAC/samg.matrix.coo'
+XLIM = (-10, 30)
 
 # ── variable maps ──────────────────────────────────────────────────────────────
 
@@ -71,22 +75,18 @@ LABELS = {
 def load_coo(path, neq):
     """
     Read a samg .matrix.coo file.
-
-    Format:
-      Line 1  :  npoints_total   ndim
-      Lines 2+:  x   y
-    Each mesh node has exactly `neq` consecutive identical rows (one per DOF).
-    We only keep the first row of each group → gridpoints = npoints_total // neq.
+    Line 1  : npoints_total  ndim
+    Lines 2+: x  y  (neq identical rows per mesh node; keep only first of each)
     """
     print(f"  Reading: {path}")
     with open(path, 'r') as fh:
-        header = fh.readline().split()
+        header        = fh.readline().split()
         npoints_total = int(header[0])
         ndim          = int(header[1])
         gridpoints    = npoints_total // neq
 
         print(f"    npoints_total = {npoints_total}   ndim = {ndim}   neq = {neq}")
-        print(f"    → unique nodes = {gridpoints}")
+        print(f"    -> unique nodes = {gridpoints}")
 
         if npoints_total % neq != 0:
             print(f"  WARNING: {npoints_total} % {neq} = {npoints_total % neq} "
@@ -97,8 +97,8 @@ def load_coo(path, neq):
 
         node = 0
         for line_idx, line in enumerate(fh):
-            if line_idx % neq == 0:          # first DOF of each node
-                vals = line.split()
+            if line_idx % neq == 0:
+                vals   = line.split()
                 x[node] = float(vals[0])
                 y[node] = float(vals[1])
                 node += 1
@@ -115,7 +115,7 @@ def load_coo(path, neq):
 def read_pval(path, vars_to_plot):
     """
     Read .pval NetCDF file.
-    no_of_points = 2 * gridpoints  (second half is a mirror copy — ignored here).
+    no_of_points = 2 * gridpoints  (second half is a mirror copy, ignored).
     Returns (gridpoints, {varname: complex_array}).
     """
     data = {}
@@ -125,7 +125,7 @@ def read_pval(path, vars_to_plot):
         avail      = set(ds.variables.keys())
 
         print(f"  File         : {path}")
-        print(f"  no_of_points : {nprob}  →  gridpoints = {gridpoints}")
+        print(f"  no_of_points : {nprob}  ->  gridpoints = {gridpoints}")
         print(f"  Variables    : {sorted(avail)}")
         print()
 
@@ -193,10 +193,7 @@ def check_mesh(x, y, output=None):
 # ── colour-map helper ──────────────────────────────────────────────────────────
 
 def symmetric_norm(data, pct=99):
-    """
-    Symmetric diverging norm centred on zero.
-    vmax is set to the `pct` percentile of |data|, clipping outliers.
-    """
+    """Symmetric diverging norm centred on zero; vmax = pct-th percentile of |data|."""
     vmax = float(np.nanpercentile(np.abs(data), pct))
     if vmax == 0:
         vmax = float(np.nanmax(np.abs(data)))
@@ -204,9 +201,10 @@ def symmetric_norm(data, pct=99):
         vmax = 1.0
     return matplotlib.colors.TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
 
-# ── triangulation ──────────────────────────────────────────────────────────────
+# ── renderers ──────────────────────────────────────────────────────────────────
 
 def build_triangulation(x, y):
+    """Delaunay triangulation with degenerate-triangle masking."""
     print("  Building Delaunay triangulation …", end=' ', flush=True)
     triang = tri.Triangulation(x, y)
     mask   = tri.TriAnalyzer(triang).get_flat_tri_mask(min_circle_ratio=0.01)
@@ -216,40 +214,50 @@ def build_triangulation(x, y):
 
 # ── mode plot ──────────────────────────────────────────────────────────────────
 
-def plot_modes(x, y, mode_data, cmap, output_stem, title_prefix, use_scatter=False):
+def plot_modes(x, y, mode_data, cmap, output_stem, title_prefix,
+               triang=None,
+               clim_pct=99, plot_imag=False, plot_both=False):
     """
-    Save one PNG per variable:  <output_stem>_<varname>.png
-    Each figure has 2 rows stacked vertically: Real (top) and Imag (bottom),
-    with a horizontal colourbar under each panel.
+    Save one PNG per variable: <output_stem>_<varname>[_i|_ri].png
+
+    By default plots only the real part (1 panel).
+    --imag : plot imaginary part only  -> suffix _i
+    --both : real + imag stacked       -> suffix _ri
     """
     if not mode_data:
         print("  Nothing to plot.")
         return
 
-    # Build triangulation once, reused for every variable
-    triang = None
-    if not use_scatter:
-        triang = build_triangulation(x, y)
+    # Decide which parts to render
+    if plot_both:
+        parts = [('Real', lambda c: c.real), ('Imag', lambda c: c.imag)]
+        suffix = '_ri'
+    elif plot_imag:
+        parts  = [('Imag', lambda c: c.imag)]
+        suffix = '_i'
+    else:
+        parts  = [('Real', lambda c: c.real)]
+        suffix = ''
+
+    n_panels = len(parts)
 
     for vname, cdata in mode_data.items():
         label = LABELS.get(vname, vname)
 
         fig, axes = plt.subplots(
-            2, 1,
-            figsize=(14, 6.4),
+            n_panels, 1,
+            figsize=(14, 3.2 * n_panels),
             constrained_layout=True,
+            squeeze=False,
         )
 
-        for ax, (part_label, arr) in zip(axes, [('Real', cdata.real),
-                                                 ('Imag', cdata.imag)]):
-            norm = symmetric_norm(arr, pct=90) # clip outliers for better contrast
+        for ax, (part_label, extractor) in zip(axes[:, 0], parts):
+            arr  = extractor(cdata)
+            norm = symmetric_norm(arr, pct=clim_pct)
 
-            if use_scatter:
-                im = ax.scatter(x, y, c=arr, cmap=cmap, norm=norm,
-                                s=1, linewidths=0, rasterized=True)
-            else:
-                im = ax.tripcolor(triang, arr, cmap=cmap, norm=norm,
-                                  shading='gouraud', rasterized=True)
+            im = ax.tripcolor(triang, arr, cmap=cmap, norm=norm,
+                              shading='gouraud', rasterized=True)
+            ax.set_xlim(*XLIM)
 
             cb = fig.colorbar(im, ax=ax, orientation='horizontal',
                               pad=0.15, fraction=0.03, aspect=50)
@@ -257,16 +265,34 @@ def plot_modes(x, y, mode_data, cmap, output_stem, title_prefix, use_scatter=Fal
             ax.set_title(f'{part_label}  {label}', fontsize=11, loc='left')
             ax.set_xlabel('x', fontsize=9)
             ax.set_ylabel('y', fontsize=9)
-            ax.set_xlim(-5, 20)
             ax.set_aspect('equal', adjustable='box')
             ax.tick_params(labelsize=8)
 
         fig.suptitle(f'{title_prefix}  —  {label}', fontsize=13, fontweight='bold')
 
-        out = f'{output_stem}_{vname}.png'
+        out = f'{output_stem}_{vname}{suffix}.png'
         fig.savefig(out, dpi=150, bbox_inches='tight')
         print(f"  Saved: {out}")
         plt.close(fig)
+
+# ── mode index parser ──────────────────────────────────────────────────────────
+
+def parse_mode_indices(tokens):
+    """
+    Parse --modes tokens into a sorted list of integers.
+      '3'        -> [3]
+      '0-9'      -> [0,1,...,9]
+      '0' '2' '5'-> [0,2,5]
+      '0-4' '7'  -> [0,1,2,3,4,7]
+    """
+    indices = []
+    for token in tokens:
+        if '-' in token and not token.lstrip('-').isdigit():
+            start, end = token.split('-')
+            indices.extend(range(int(start), int(end) + 1))
+        else:
+            indices.append(int(token))
+    return sorted(set(indices))
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
@@ -277,48 +303,50 @@ def parse_args():
         epilog=__doc__)
 
     p.add_argument('pval', nargs='?', default=None,
-                   help='Path to a single .pval file. '
-                        'Not required with --check-mesh or --modes.')
+                   help='Path to a single .pval file '
+                        '(not required with --check-mesh or --modes)')
 
-    p.add_argument('--modes', nargs=2, type=int, metavar=('START', 'END'),
-                   default=None,
-                   help='Sweep over eigf_<i>.pval for i in [START, END] inclusive. '
-                        'E.g. --modes 0 9')
+    p.add_argument('--modes', nargs='+', metavar='N', default=None,
+                   help='Modes to plot: single (--modes 2), range (--modes 0-9), '
+                        'or list (--modes 0 2 5)')
 
     p.add_argument('--dir', default='.',
-                   help='Directory containing the eigf_*.pval files '
-                        '(default: current directory)')
+                   help='Directory containing eigf_*.pval files (default: .)')
 
     p.add_argument('--coords', default=DEFAULT_COORDS,
-                   help=f'Path to the .coo coordinate file '
-                        f'(default: {DEFAULT_COORDS})')
+                   help=f'Path to .coo coordinate file (default: {DEFAULT_COORDS})')
 
     p.add_argument('--neq', type=int, default=4,
                    help='DOF per grid node in the .coo file (default: 4)')
 
     p.add_argument('--vars', nargs='+', default=['rho', 'u', 'w', 'e'],
-                   help='Variables to plot. '
-                        f'Available: {list(VAR_MAP.keys())} '
-                        '(default: rho u w e)')
+                   help=f'Variables to plot (default: rho u w e). '
+                        f'Available: {list(VAR_MAP.keys())}')
 
-    p.add_argument('--cmap', default='RdBu_r',
-                   help='Matplotlib colourmap (default: RdBu_r)')
+    p.add_argument('--imag', action='store_true',
+                   help='Plot imaginary part instead of real part')
 
-    p.add_argument('--scatter', action='store_true',
-                   help='Scatter plot instead of Delaunay triangulation '
-                        '(faster, lower quality)')
+    p.add_argument('--both', action='store_true',
+                   help='Plot real and imaginary parts (2 panels per figure)')
+
+    p.add_argument('--cmap', default='coolwarm',
+                   help='Matplotlib colourmap (default: coolwarm)')
+
+    p.add_argument('--clim', type=float, default=95,
+                   help='Percentile for colorbar range [0-100] (default: 95). '
+                        'Lower values clip outliers and improve contrast.')
+
+
+
 
     p.add_argument('--output', default=None,
-                   help='Output path for --check-mesh figure. '
-                        'Mode plots are always saved automatically as '
-                        '<pval_stem>_<varname>.png')
+                   help='Output path for --check-mesh figure')
 
     p.add_argument('--title', default='',
                    help='Optional figure title prefix')
 
     p.add_argument('--check-mesh', action='store_true',
-                   help='Load coordinates and plot mesh nodes only '
-                        '(sanity check — no .pval file needed)')
+                   help='Plot mesh nodes only (sanity check, no .pval needed)')
 
     return p.parse_args()
 
@@ -340,17 +368,24 @@ def main():
         print("Done.\n")
         return
 
-    # ── 3. build list of pval files to process ─────────────────────────────────
+    # ── 3. build triangulation (once for all modes) ─────────────────────────
+    print(f"\n── Preparing renderer ──────────────────────────────────────────")
+    triang_grid = build_triangulation(x, y)
+
+    # ── 4. build triangulation (cached, rebuilt only if coords are truncated) ───
+    triang_cache      = build_triangulation(x, y)
+    triang_cache_size = len(x)
+
+    # ── 5. build list of pval files ────────────────────────────────────────────
     if args.modes is not None:
-        start, end = args.modes
-        pval_files = [os.path.join(args.dir, f'eigf_{i}.pval')
-                      for i in range(start, end + 1)]
+        indices    = parse_mode_indices(args.modes)
+        pval_files = [os.path.join(args.dir, f'eigf_{i}.pval') for i in indices]
     elif args.pval is not None:
         pval_files = [args.pval]
     else:
-        sys.exit("ERROR: provide a .pval file or use --modes START END.")
+        sys.exit("ERROR: provide a .pval file or use --modes.")
 
-    # ── 4. process each file ───────────────────────────────────────────────────
+    # ── 6. process each file ───────────────────────────────────────────────────
     for pval_path in pval_files:
         if not os.path.isfile(pval_path):
             print(f"\n  [skip] File not found: '{pval_path}'")
@@ -363,24 +398,32 @@ def main():
             print(f"  [skip] No data loaded from '{pval_path}'.")
             continue
 
-        # size consistency
+        # size consistency — rebuild triangulation only when node count changes
         n_coords = len(x)
         if n_coords != gridpoints:
             print(f"\n  WARNING: coord nodes ({n_coords}) ≠ pval gridpoints ({gridpoints}).")
             common = min(n_coords, gridpoints)
-            print(f"  Truncating both to {common}.")
+            print(f"  Truncating to {common} nodes.")
             xi = x[:common];  yi = y[:common]
             mode_data = {k: v[:common] for k, v in mode_data.items()}
         else:
             xi, yi = x, y
+            common = n_coords
+
+        if common != triang_cache_size:
+            print(f"  Node count changed ({triang_cache_size} → {common}), rebuilding triangulation …")
+            triang_cache      = build_triangulation(xi, yi)
+            triang_cache_size = common
 
         title       = args.title if args.title else os.path.basename(pval_path)
         output_stem = os.path.splitext(os.path.abspath(pval_path))[0]
 
         print(f"\n── Plotting ────────────────────────────────────────────────────")
-        print(f"  Output stem: {output_stem}_<varname>.png")
         plot_modes(xi, yi, mode_data, args.cmap, output_stem, title,
-                   use_scatter=args.scatter)
+                   triang=triang_cache,
+                   clim_pct=args.clim,
+                   plot_imag=args.imag,
+                   plot_both=args.both)
 
     print("Done.\n")
 
