@@ -208,7 +208,7 @@ def run_slices():
     zmin = 0
     zmax = 0.5
     #######################
-    nev = 30
+    nev = 10 # Number of eigenvalues requested
     adjoint = False
     the_shift = 0
     #######################
@@ -510,7 +510,8 @@ def run_slices():
 
         xr, tmp = shell.P.getVecs()
         xi, tmp = shell.P.getVecs()
-        eigpre, tmp = A.getVecs()
+        eigpre, tmp = A.getVecs()   # forcing:  P * f_hat  (full space)
+        resppre, tmp = A.getVecs()  # response: L^-1 * P * f_hat (full space)
         eigs = []
         if nconv > 0:
             Print("")
@@ -525,17 +526,28 @@ def run_slices():
                 else:
                     Print(" %12f         %12g" % (k.real, error))
 
+                # --- Save optimal forcing: eigf_i = P * f_hat_i ---
                 eigvecfile = './RESULTS_resolvent/eigf_'+str(i)+'.pval'
-                shell.P.mult(xr,eigpre)
+                shell.P.mult(xr, eigpre)
                 scatter, eigenvec = PETSc.Scatter.toZero(eigpre)
                 scatter.scatter(eigpre, eigenvec, False, PETSc.Scatter.Mode.FORWARD)
                 if (rank==0):
                     mode2pval(eigvecfile, eigenvec, nvars, n, neq, beta, dreduced, rgid)
 
+                # --- Save optimal response: eigr_i = L^-1 * P * f_hat_i ---
+                # eigpre = P * f_hat_i already computed above
+                shell.ksp.solve(eigpre, resppre)
+                respvecfile = './RESULTS_resolvent/eigr_'+str(i)+'.pval'
+                scatter_r, respvec = PETSc.Scatter.toZero(resppre)
+                scatter_r.scatter(resppre, respvec, False, PETSc.Scatter.Mode.FORWARD)
+                if (rank==0):
+                    mode2pval(respvecfile, respvec, nvars, n, neq, beta, dreduced, rgid)
+
 
             Print("")
 
         eigpre.destroy()
+        resppre.destroy()
         xi.destroy()
         xr.destroy()
         R.destroy()
