@@ -1,8 +1,11 @@
 #! /usr/bin/env python
-# This file only runs in sequential mode
-
+#
+# Usage: python EIGENSOLVER.py eigensolver.ini
+#        mpirun -n 4 python EIGENSOLVER.py eigensolver.ini
+#
 import numpy as np
 import sys, os
+import configparser
 from netCDF4 import Dataset
 from scipy.sparse import csr_matrix, linalg as sla
 from scipy.sparse import identity
@@ -10,7 +13,6 @@ from scipy.sparse import identity
 from jac_red import domain_reduction
 from save2pval import mode2pval, mode2pval3D
 from input_output import openjacobian, read_coordinates
-import pdb
 
 import petsc4py
 import slepc4py
@@ -21,37 +23,119 @@ from mpi4py import MPI
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Control file reader
+# ─────────────────────────────────────────────────────────────────────────────
+
+def read_control_file(filepath):
+    """
+    Read parameters from a .ini control file.
+
+    Expected sections and keys:
+
+        [io]
+            input_path      : directory containing Jacobian / volume / coord files
+            output_path     : directory for eigenvalue and eigenvector output
+            jac_file        : Jacobian filename   (default: samg.matrix.amg.pval)
+            vol_file        : volumes filename    (default: samg.matrix.vol)
+            coord_file      : coordinates filename (default: samg.matrix.coo)
+
+        [physics]
+            mach            : Mach number
+            beta            : spanwise wavenumber (0 for 2D)
+            rlength         : reference length (default: 1.0)
+
+        [solver]
+            nev             : number of eigenvalues requested
+            shift_real      : real part of the spectral shift
+            shift_imag      : imaginary part of the spectral shift
+            tol             : EPS convergence tolerance  (default: 1e-8)
+            max_it          : EPS maximum iterations     (default: 15000)
+            adjoint         : solve adjoint problem?     (default: False)
+            gen             : generalised EVP (Ax=sMx)?  (default: False)
+
+        [domain_reduction]
+            enabled         : apply domain reduction?    (default: False)
+            xmin            : x lower bound
+            xmax            : x upper bound
+            zmin            : z lower bound
+            zmax            : z upper bound
+
+        [checkpoint]
+            dup_tol_real    : duplicate tolerance, real part  (default: 1e-5)
+            dup_tol_imag    : duplicate tolerance, imag part  (default: 1e-5)
+
+    Returns
+    -------
+    dict with all parameters.
+    """
+    if not os.path.isfile(filepath):
+        raise FileNotFoundError('Control file not found: {0}'.format(filepath))
+
+    cfg = configparser.ConfigParser()
+    cfg.read(filepath)
+
+    p = {}
+
+    # [io]
+    p['input_path']  = cfg.get('io', 'input_path').strip()
+    p['output_path'] = cfg.get('io', 'output_path').strip()
+    p['jac_file']    = cfg.get('io', 'jac_file',   fallback='samg.matrix.amg.pval').strip()
+    p['vol_file']    = cfg.get('io', 'vol_file',   fallback='samg.matrix.vol').strip()
+    p['coord_file']  = cfg.get('io', 'coord_file', fallback='samg.matrix.coo').strip()
+
+    # [physics]
+    p['mach']    = cfg.getfloat('physics', 'mach')
+    p['beta']    = cfg.getfloat('physics', 'beta',    fallback=0.0)
+    p['rlength'] = cfg.getfloat('physics', 'rlength', fallback=1.0)
+
+    # [solver]
+    p['nev']     = cfg.getint  ('solver', 'nev')
+    sr           = cfg.getfloat('solver', 'shift_real')
+    si           = cfg.getfloat('solver', 'shift_imag')
+    p['shift']   = complex(sr, si)
+    p['tol']     = cfg.getfloat('solver', 'tol',     fallback=1e-8)
+    p['max_it']  = cfg.getint  ('solver', 'max_it',  fallback=15000)
+    p['adjoint'] = cfg.getboolean('solver', 'adjoint', fallback=False)
+    p['gen']     = cfg.getboolean('solver', 'gen',     fallback=False)
+
+    # [domain_reduction]
+    p['dreduced'] = cfg.getboolean('domain_reduction', 'enabled', fallback=False)
+    p['xmin']     = cfg.getfloat  ('domain_reduction', 'xmin',    fallback=0.0)
+    p['xmax']     = cfg.getfloat  ('domain_reduction', 'xmax',    fallback=1.0)
+    p['zmin']     = cfg.getfloat  ('domain_reduction', 'zmin',    fallback=-1.0)
+    p['zmax']     = cfg.getfloat  ('domain_reduction', 'zmax',    fallback=1.0)
+
+    # [checkpoint]
+    p['dup_tol_real'] = cfg.getfloat('checkpoint', 'dup_tol_real', fallback=1e-5)
+    p['dup_tol_imag'] = cfg.getfloat('checkpoint', 'dup_tol_imag', fallback=1e-5)
+
+    return p
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Checkpoint helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_previous_eigenvalues(eigv_file):
-    """
-    Read eigenvalues already stored in eigv_file.
-    Returns a list of complex numbers and the highest index found.
-    """
+    """Read eigenvalues already stored in eigv_file.
+    Returns a list of complex numbers and the count of entries found."""
     eigs_prev = []
-    max_index  = -1
     if not os.path.isfile(eigv_file):
-        return eigs_prev, max_index
+        return eigs_prev
     with open(eigv_file, 'r') as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             parts = line.split()
-            idx   = int(parts[0])
-            re    = float(parts[1])
-            im    = float(parts[2])
+            re = float(parts[1])
+            im = float(parts[2])
             eigs_prev.append(complex(re, im))
-            max_index = max(max_index, idx)
-    return eigs_prev, max_index
+    return eigs_prev
 
 
 def is_duplicate(new_eig, existing_eigs, tol_real=1e-5, tol_imag=1e-5):
-    """
-    Return True if new_eig is already present in existing_eigs within tolerance.
-    Both real and imaginary parts must be within their respective tolerances.
-    """
+    """Return True if new_eig already exists in existing_eigs within tolerance."""
     for e in existing_eigs:
         if abs(new_eig.real - e.real) < tol_real and \
            abs(new_eig.imag - e.imag) < tol_imag:
@@ -60,9 +144,7 @@ def is_duplicate(new_eig, existing_eigs, tol_real=1e-5, tol_imag=1e-5):
 
 
 def next_eigvec_index(results_dir):
-    """
-    Scan results_dir for eigf_N.pval files and return the next available index.
-    """
+    """Return the next available index for eigf_N.pval files."""
     max_idx = -1
     if os.path.isdir(results_dir):
         for fname in os.listdir(results_dir):
@@ -79,78 +161,86 @@ def next_eigvec_index(results_dir):
 # Main solver
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_slices():
+def run_slices(params):
     comm = MPI.COMM_WORLD
-    size = comm.Get_size()
     rank = comm.Get_rank()
     Print = PETSc.Sys.Print
 
-    # Path to the Jacobian and volumes files
-    input_file_path = '/home/w059/w059589/projects/07_TRANSDIFFUSE/02_BFS/JAC/'
+    # ── Unpack parameters ────────────────────────────────────────────────────
+    input_path   = params['input_path']
+    output_path  = params['output_path']
+    mach         = params['mach']
+    beta         = params['beta']
+    rlength      = params['rlength']
+    nev          = params['nev']
+    the_shift    = params['shift']
+    tol          = params['tol']
+    max_it       = params['max_it']
+    adjoint      = params['adjoint']
+    gen          = params['gen']
+    dreduced     = params['dreduced']
+    xmin         = params['xmin'];  xmax = params['xmax']
+    zmin         = params['zmin'];  zmax = params['zmax']
+    dup_tol_real = params['dup_tol_real']
+    dup_tol_imag = params['dup_tol_imag']
 
-    #######################
-    jacfile = input_file_path + 'samg.matrix.amg.pval'
-    volfile = input_file_path + 'samg.matrix.vol'
-    #######################
-    beta    = 0.0
-    mach    = 0.1
-    rlength = 1
-    #######################
-    dreduced = False
-    xmin =  0.12;  xmax = 0.35
-    zmin = -0.05;  zmax = 0.05
-    #######################
-    nev       = 50
-    gen       = False
-    adjoint   = False
-    the_shift = -0.05 + 4*1j
-    #######################
-
-    # Duplicate-detection tolerances
-    dup_tol_real = 1e-5
-    dup_tol_imag = 1e-5
+    jacfile = os.path.join(input_path, params['jac_file'])
+    volfile = os.path.join(input_path, params['vol_file'])
+    coofile = os.path.join(input_path, params['coord_file'])
 
     fac = 1. / (mach * np.sqrt(1.4))
 
-    results_dir = './RESULTS_eig'
-    if not os.path.isdir(results_dir):
-        os.mkdir(results_dir)
+    if not os.path.isdir(output_path):
+        os.mkdir(output_path)
 
-    # ── Determine output eigenvalue file ────────────────────────────────────
-    if adjoint:
-        eigv_file = os.path.join(results_dir, 'eigv_ADJ.dat')
-    else:
-        eigv_file = os.path.join(results_dir, 'eigv_DIR.dat')
+    # ── Print run summary ────────────────────────────────────────────────────
+    Print('')
+    Print(' ========================================')
+    Print('  EIGENSOLVER — FLORES')
+    Print(' ========================================')
+    Print(' Input path  : {0}'.format(input_path))
+    Print(' Output path : {0}'.format(output_path))
+    Print(' Jacobian    : {0}'.format(jacfile))
+    Print(' Mach        : {0}'.format(mach))
+    Print(' beta        : {0}'.format(beta))
+    Print(' Shift       : {0}'.format(the_shift))
+    Print(' nev         : {0}'.format(nev))
+    Print(' Adjoint     : {0}'.format(adjoint))
+    Print(' Generalised : {0}'.format(gen))
+    Print(' Dom. reduc. : {0}'.format(dreduced))
+    Print(' ========================================')
+    Print('')
 
-    # ── Load previously computed eigenvalues (rank 0 reads, then broadcasts) -
+    # ── Determine eigenvalue output file ────────────────────────────────────
+    eigv_filename = 'eigv_ADJ.dat' if adjoint else 'eigv_DIR.dat'
+    eigv_file     = os.path.join(output_path, eigv_filename)
+
+    # ── Load checkpoint (rank 0, then broadcast) ─────────────────────────────
     if rank == 0:
-        eigs_prev, _ = load_previous_eigenvalues(eigv_file)
-        n_prev = len(eigs_prev)
-        Print(f' Found {n_prev} previously computed eigenvalue(s) in {eigv_file}')
+        eigs_prev = load_previous_eigenvalues(eigv_file)
+        n_prev    = len(eigs_prev)
+        Print(' Found {0} previously computed eigenvalue(s) in {1}'.format(
+              n_prev, eigv_file))
     else:
         eigs_prev = None
         n_prev    = None
 
-    # Broadcast to all ranks so every process can check duplicates
     eigs_prev = comm.bcast(eigs_prev, root=0)
     n_prev    = comm.bcast(n_prev,    root=0)
-
-    # Starting index for new eigenvector files
-    file_start_idx = next_eigvec_index(results_dir)
+    file_start_idx = next_eigvec_index(output_path)
 
     # ── Read Jacobian ────────────────────────────────────────────────────────
-    Print('')
     Print(' Reading Jacobian')
     amatrix, neq = openjacobian(jacfile)
     amatrix.data *= fac
     nvars = amatrix.shape[0]
-    Print(f' Matrix main dimension = {nvars}')
-    Print(f' Number of equations   = {neq}')
+    Print(' Matrix main dimension = {0}'.format(nvars))
+    Print(' Number of equations   = {0}'.format(neq))
     Print('')
 
     gridpoints = int(nvars / neq)
 
-    # ── Mass matrix ─────────────────────────────────────────────────────────
+    # ── Mass matrix ──────────────────────────────────────────────────────────
     Print(' Reading mass matrix and generating M')
     Print('')
     one = 1. + 0j
@@ -161,36 +251,33 @@ def run_slices():
 
     # ── Domain reduction ─────────────────────────────────────────────────────
     if dreduced:
-        Print('')
         Print(' Applying domain reduction')
-        Print(f' XMIN/XMAX = {xmin}/{xmax}')
-        Print(f' ZMIN/ZMAX = {zmin}/{zmax}')
-        coord = read_coordinates(input_file_path + 'samg.matrix.coo', rlength, beta)
+        Print(' XMIN/XMAX = {0}/{1}'.format(xmin, xmax))
+        Print(' ZMIN/ZMAX = {0}/{1}'.format(zmin, zmax))
+        coord = read_coordinates(coofile, rlength, beta)
         dr = domain_reduction(zmin, zmax, xmin, xmax)
         dr.create_Pmatrix(coord)
-        Print(f' Previous NNZ = {amatrix.nnz}')
+        Print(' Previous NNZ = {0}'.format(amatrix.nnz))
         amatrix = dr.reduce_matrix(amatrix)
-        Print(f' New NNZ      = {amatrix.nnz}')
+        Print(' New NNZ      = {0}'.format(amatrix.nnz))
         bmatrix = dr.reduce_matrix(bmatrix)
         n = amatrix.shape[0]
-        Print(f' New leading dimension of A = {n}')
+        Print(' New leading dimension of A = {0}'.format(n))
         localid = np.arange(0, gridpoints, 1, dtype='i4')
         localid = np.repeat(localid, neq)
-        rgid = dr.reduce_vector(localid)
-        rgid = rgid[0::neq].astype(int)
+        rgid = dr.reduce_vector(localid)[0::neq].astype(int)
         Print('')
     else:
         rgid = None
         n    = nvars
 
-    # ── PETSc matrices ───────────────────────────────────────────────────────
+    # ── Assemble PETSc matrices ──────────────────────────────────────────────
     A = PETSc.Mat()
     A.create(PETSc.COMM_WORLD)
     A.setSizes([n, n])
     A.setUp()
     A.setType('seqaij')
-
-    Print(' Assembling PETSc matrix...')
+    Print(' Assembling PETSc matrix A...')
     A.setPreallocationCSR((amatrix.indptr[:],
                            amatrix.indices[:],
                            amatrix.data[:]))
@@ -246,7 +333,7 @@ def run_slices():
     opts["icntl_10"] = 4
     opts["cntl_3"]   = 1e-6
 
-    E.setTolerances(tol=1e-8, max_it=15000)
+    E.setTolerances(tol=tol, max_it=max_it)
     E.setDimensions(nev, ncv, mpd)
     E.setWhichEigenpairs(E.Which.TARGET_MAGNITUDE)
     E.setTarget(complex(the_shift))
@@ -269,15 +356,15 @@ def run_slices():
     E.solve()
 
     # ── Post-processing ──────────────────────────────────────────────────────
-    its   = E.getIterationNumber()
-    tol, max_it = E.getTolerances()
-    ksp_its = K.getIterationNumber()
-    nconv = E.getConverged()
+    its             = E.getIterationNumber()
+    tol_out, max_it_out = E.getTolerances()
+    ksp_its         = K.getIterationNumber()
+    nconv           = E.getConverged()
 
     if rank == 0:
         print('')
         print(' Iterations (EPS)  : ', its)
-        print(' Tolerance / max_it: ', tol, ' / ', max_it)
+        print(' Tolerance / max_it: ', tol_out, ' / ', max_it_out)
         print(' Iterations (KSP)  : ', ksp_its)
         print(' Requested         : ', nev)
         print(' Converged         : ', nconv)
@@ -285,9 +372,9 @@ def run_slices():
     xr, xrl = A.getVecs()
     xi, xil = A.getVecs()
 
-    new_eigs    = []   # new eigenvalues accepted in this run
-    skipped     = 0
-    file_idx    = file_start_idx   # running index for eigenvector files
+    new_eigs   = []
+    skipped    = 0
+    file_idx   = file_start_idx
 
     if nconv > 0:
         Print("")
@@ -298,7 +385,6 @@ def run_slices():
             k     = E.getEigenpair(i, xr, xi)
             error = E.computeError(i)
 
-            # ── Duplicate check ──────────────────────────────────────────────
             already_known = is_duplicate(k, eigs_prev,
                                          tol_real=dup_tol_real,
                                          tol_imag=dup_tol_imag)
@@ -313,8 +399,8 @@ def run_slices():
                 skipped += 1
                 continue
 
-            # ── Save eigenvector ─────────────────────────────────────────────
-            eigvecfile = os.path.join(results_dir, f'eigf_{file_idx}.pval')
+            # Save eigenvector
+            eigvecfile = os.path.join(output_path, 'eigf_{0}.pval'.format(file_idx))
             scatter, eigenvec = PETSc.Scatter.toZero(xr)
             scatter.scatter(xr, eigenvec, False, PETSc.Scatter.Mode.FORWARD)
             if rank == 0:
@@ -327,24 +413,33 @@ def run_slices():
 
         Print("")
 
-    # ── Append new eigenvalues to file ───────────────────────────────────────
+    # ── Append new eigenvalues to checkpoint file ────────────────────────────
     if rank == 0:
         n_new = len(new_eigs)
-        Print(f' Summary: {nconv} converged  |  {skipped} duplicates skipped  |  {n_new} new')
+        Print(' Summary: {0} converged  |  {1} duplicates skipped  |  {2} new'.format(
+              nconv, skipped, n_new))
 
         if n_new > 0:
-            # Index offset: continue from where previous run left off
-            write_offset = n_prev
-            print(f' Appending {n_new} new eigenvalue(s) to {eigv_file}')
+            print(' Appending {0} new eigenvalue(s) to {1}'.format(n_new, eigv_file))
             with open(eigv_file, 'a') as w:
                 for j, eig in enumerate(new_eigs):
                     w.write('{0:2d}   {1:12.8f}   {2:12.8f}\n'.format(
-                        write_offset + j, eig.real, eig.imag))
+                        n_prev + j, eig.real, eig.imag))
             print(' DONE')
         else:
             print(' No new eigenvalues to save.')
         print('')
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    run_slices()
+
+    if len(sys.argv) < 2:
+        print('Usage: python EIGENSOLVER.py <control_file.ini>')
+        print('       mpirun -n 4 python EIGENSOLVER.py <control_file.ini>')
+        sys.exit(1)
+
+    ctrl_file = sys.argv[1]
+    params    = read_control_file(ctrl_file)
+    run_slices(params)
