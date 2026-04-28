@@ -5,10 +5,9 @@
 #
 import numpy as np
 import sys, os
+import time
 import configparser
-from netCDF4 import Dataset
-from scipy.sparse import csr_matrix, linalg as sla
-from scipy.sparse import identity
+from scipy.sparse import csr_matrix, linalg as sla, identity
 
 from jac_red import domain_reduction
 from save2pval import mode2pval, mode2pval3D
@@ -20,6 +19,18 @@ slepc4py.init(sys.argv)
 from petsc4py import PETSc
 from slepc4py import SLEPc
 from mpi4py import MPI
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Timing helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _t(comm, rank, label, t0):
+    """Print elapsed time since t0 from rank 0, after a barrier sync."""
+    comm.Barrier()
+    if rank == 0:
+        PETSc.Sys.Print(' [TIMING] {0:<40s} {1:8.2f} s'.format(
+            label, time.time() - t0))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -118,7 +129,7 @@ def read_control_file(filepath):
 
 def load_previous_eigenvalues(eigv_file):
     """Read eigenvalues already stored in eigv_file.
-    Returns a list of complex numbers and the count of entries found."""
+    Returns a list of complex numbers."""
     eigs_prev = []
     if not os.path.isfile(eigv_file):
         return eigs_prev
@@ -162,9 +173,11 @@ def next_eigvec_index(results_dir):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_slices(params):
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
+    comm  = MPI.COMM_WORLD
+    rank  = comm.Get_rank()
     Print = PETSc.Sys.Print
+
+    t_total = time.time()
 
     # ── Unpack parameters ────────────────────────────────────────────────────
     input_path   = params['input_path']
@@ -215,7 +228,8 @@ def run_slices(params):
     eigv_filename = 'eigv_ADJ.dat' if adjoint else 'eigv_DIR.dat'
     eigv_file     = os.path.join(output_path, eigv_filename)
 
-    # ── Load checkpoint (rank 0, then broadcast) ─────────────────────────────
+    # ── Load checkpoint ──────────────────────────────────────────────────────
+    t0 = time.time()
     if rank == 0:
         eigs_prev = load_previous_eigenvalues(eigv_file)
         n_prev    = len(eigs_prev)
@@ -225,31 +239,77 @@ def run_slices(params):
         eigs_prev = None
         n_prev    = None
 
-    eigs_prev = comm.bcast(eigs_prev, root=0)
-    n_prev    = comm.bcast(n_prev,    root=0)
+    eigs_prev      = comm.bcast(eigs_prev, root=0)
+    n_prev         = comm.bcast(n_prev,    root=0)
     file_start_idx = next_eigvec_index(output_path)
+    _t(comm, rank, 'Checkpoint load', t0)
 
-    # ── Read Jacobian ────────────────────────────────────────────────────────
+    # ── Read Jacobian (rank 0 only, then broadcast) ──────────────────────────
+    t0 = time.time()
     Print(' Reading Jacobian')
-    amatrix, neq = openjacobian(jacfile)
-    amatrix.data *= fac
-    nvars = amatrix.shape[0]
+    if rank == 0:
+        amatrix, neq = openjacobian(jacfile)
+        amatrix.data *= fac
+        nvars  = amatrix.shape[0]
+        nnz    = amatrix.nnz
+        meta   = np.array([neq, nvars, nnz], dtype=np.int64)
+    else:
+        meta   = np.empty(3, dtype=np.int64)
+
+    # Broadcast scalar metadata first (tiny)
+    comm.Bcast(meta, root=0)
+    neq, nvars, nnz = int(meta[0]), int(meta[1]), int(meta[2])
+
+    # Allocate buffers on non-root ranks
+    if rank == 0:
+        indptr_buf  = amatrix.indptr.astype(np.int32)
+        indices_buf = amatrix.indices.astype(np.int32)
+        data_buf    = amatrix.data.astype(np.complex128)
+    else:
+        indptr_buf  = np.empty(nvars + 1,  dtype=np.int32)
+        indices_buf = np.empty(nnz,         dtype=np.int32)
+        data_buf    = np.empty(nnz,         dtype=np.complex128)
+
+    # Broadcast the three CSR arrays using MPI buffer protocol (no pickle)
+    comm.Bcast(indptr_buf,  root=0)
+    comm.Bcast(indices_buf, root=0)
+    comm.Bcast(data_buf,    root=0)
+
+    amatrix = csr_matrix((data_buf, indices_buf, indptr_buf),
+                         shape=(nvars, nvars))
+
     Print(' Matrix main dimension = {0}'.format(nvars))
     Print(' Number of equations   = {0}'.format(neq))
     Print('')
+    _t(comm, rank, 'Jacobian read', t0)
 
     gridpoints = int(nvars / neq)
 
-    # ── Mass matrix ──────────────────────────────────────────────────────────
+    # ── Mass matrix (rank 0 reads vols, then broadcast) ──────────────────────
+    t0 = time.time()
     Print(' Reading mass matrix and generating M')
     Print('')
-    one = 1. + 0j
-    with open(volfile, 'r') as f:
-        vols = [float(line) for line in f.readlines()]
-    bmatrix = identity(nvars, dtype='c16', format='csr')
-    bmatrix.data[:] = [vols[i // neq] * one for i in range(nvars)]
+    if rank == 0:
+        with open(volfile, 'r') as f:
+            vols_buf = np.array([float(line) for line in f.readlines()],
+                                dtype=np.float64)
+        ngp = np.array([len(vols_buf)], dtype=np.int64)
+    else:
+        ngp     = np.empty(1, dtype=np.int64)
 
+    comm.Bcast(ngp, root=0)
+    if rank != 0:
+        vols_buf = np.empty(int(ngp[0]), dtype=np.float64)
+
+    comm.Bcast(vols_buf, root=0)
+
+    one     = 1. + 0j
+    bmatrix = identity(nvars, dtype='c16', format='csr')
+    bmatrix.data[:] = [vols_buf[i // neq] * one for i in range(nvars)]
+    _t(comm, rank, 'Mass matrix build', t0)
+    
     # ── Domain reduction ─────────────────────────────────────────────────────
+    t0 = time.time()
     if dreduced:
         Print(' Applying domain reduction')
         Print(' XMIN/XMAX = {0}/{1}'.format(xmin, xmax))
@@ -270,28 +330,40 @@ def run_slices(params):
     else:
         rgid = None
         n    = nvars
+    _t(comm, rank, 'Domain reduction', t0)
 
-    # ── Assemble PETSc matrices ──────────────────────────────────────────────
+    # ── Assemble PETSc matrix A ──────────────────────────────────────────────
+    t0 = time.time()
     A = PETSc.Mat()
     A.create(PETSc.COMM_WORLD)
     A.setSizes([n, n])
+    A.setFromOptions()
     A.setUp()
-    A.setType('seqaij')
-    Print(' Assembling PETSc matrix A...')
-    A.setPreallocationCSR((amatrix.indptr[:],
-                           amatrix.indices[:],
-                           amatrix.data[:]))
-    A.assemble()
 
+    Print(' Assembling PETSc matrix A...')
+    rstart, rend  = A.getOwnershipRange()
+    indptr_local  = amatrix.indptr[rstart:rend + 1].copy()
+    indices_local = amatrix.indices[indptr_local[0]:indptr_local[-1]].copy()
+    values_local  = amatrix.data[indptr_local[0]:indptr_local[-1]].copy()
+    indptr_local  = (indptr_local - indptr_local[0]).astype(PETSc.IntType)
+    indices_local = indices_local.astype(PETSc.IntType)
+    values_local  = values_local.astype(PETSc.ScalarType)
+    A.setValuesCSR(indptr_local, indices_local, values_local)
+    A.assemble()
+    _t(comm, rank, 'PETSc matrix A assembly', t0)
+
+    # ── Assemble PETSc matrix B ──────────────────────────────────────────────
+    t0 = time.time()
     B = PETSc.Mat()
     B.create(PETSc.COMM_WORLD)
     B.setSizes([n, n])
+    B.setFromOptions()
     B.setUp()
-    B.setType('seqaij')
-    RowStart, RowEnd = B.getOwnershipRange()
-    for pt in range(RowStart, RowEnd):
+    rstart, rend = B.getOwnershipRange()
+    for pt in range(rstart, rend):
         B[pt, pt] = bmatrix.data[pt]
     B.assemble()
+    _t(comm, rank, 'PETSc matrix B assembly', t0)
 
     # ── Problem setup ────────────────────────────────────────────────────────
     Print('\n################################')
@@ -325,13 +397,17 @@ def run_slices(params):
     pc = K.getPC()
     pc.setType('lu')
     pc.setFactorSolverType('mumps')
+
     opts = PETSc.Options("mat_mumps_")
-    opts["icntl_7"]  = 4
-    opts["icntl_6"]  = 2
-    opts["icntl_4"]  = 1
-    opts["icntl_11"] = 2
-    opts["icntl_10"] = 4
+    opts["icntl_7"]  = 3    # ordering: 3=Scotch, 4=METIS — prueba ambos
+    opts["icntl_6"]  = 5    # column permutation más agresiva
+    opts["icntl_4"]  = 1    # verbosity
+    opts["icntl_14"] = 80   # aumentar workspace al 80% — reduce OOM y reruns
+    opts["icntl_23"] = 8000 # memoria máxima por proceso en MB (ajusta según RAM disponible)
+    opts["icntl_28"] = 2    # ordering paralelo
+    opts["icntl_29"] = 1    # 1=ParMETIS, 2=PT-Scotch
     opts["cntl_3"]   = 1e-6
+    # quitar icntl_10, icntl_11 — el análisis de error añade coste sin beneficio
 
     E.setTolerances(tol=tol, max_it=max_it)
     E.setDimensions(nev, ncv, mpd)
@@ -353,13 +429,16 @@ def run_slices(params):
         print(' Maximum dimension (mpd)         = ', mpd)
         print('')
 
+    # ── EPS solve ────────────────────────────────────────────────────────────
+    t0 = time.time()
     E.solve()
+    _t(comm, rank, 'EPS solve', t0)
 
     # ── Post-processing ──────────────────────────────────────────────────────
-    its             = E.getIterationNumber()
-    tol_out, max_it_out = E.getTolerances()
-    ksp_its         = K.getIterationNumber()
-    nconv           = E.getConverged()
+    its                  = E.getIterationNumber()
+    tol_out, max_it_out  = E.getTolerances()
+    ksp_its              = K.getIterationNumber()
+    nconv                = E.getConverged()
 
     if rank == 0:
         print('')
@@ -372,10 +451,12 @@ def run_slices(params):
     xr, xrl = A.getVecs()
     xi, xil = A.getVecs()
 
-    new_eigs   = []
-    skipped    = 0
-    file_idx   = file_start_idx
+    new_eigs = []
+    skipped  = 0
+    file_idx = file_start_idx
 
+    # ── Save eigenvectors ────────────────────────────────────────────────────
+    t0 = time.time()
     if nconv > 0:
         Print("")
         Print("           k           ||Ax-kx||/||kx||   status")
@@ -399,7 +480,6 @@ def run_slices(params):
                 skipped += 1
                 continue
 
-            # Save eigenvector
             eigvecfile = os.path.join(output_path, 'eigf_{0}.pval'.format(file_idx))
             scatter, eigenvec = PETSc.Scatter.toZero(xr)
             scatter.scatter(xr, eigenvec, False, PETSc.Scatter.Mode.FORWARD)
@@ -412,6 +492,7 @@ def run_slices(params):
             file_idx += 1
 
         Print("")
+    _t(comm, rank, 'Eigenvector save', t0)
 
     # ── Append new eigenvalues to checkpoint file ────────────────────────────
     if rank == 0:
@@ -429,6 +510,9 @@ def run_slices(params):
         else:
             print(' No new eigenvalues to save.')
         print('')
+
+    # ── Total ────────────────────────────────────────────────────────────────
+    _t(comm, rank, 'TOTAL', t_total)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

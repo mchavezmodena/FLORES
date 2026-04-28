@@ -666,8 +666,8 @@ def run_slices(params):
 if __name__ == "__main__":
 
     if len(sys.argv) < 2:
-        print('Usage: python RESOLVANT.py <control_file.ini>')
-        print('       mpirun -n 4 python RESOLVANT.py <control_file.ini>')
+        print('Usage: python resolvent.py <control_file.floresparam>')
+        print('       mpirun -n 4 python resolvent.py <control_file.floresparam>')
         sys.exit(1)
 
     ctrl_file = sys.argv[1]
