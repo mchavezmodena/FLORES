@@ -59,9 +59,6 @@ from netCDF4 import Dataset
 # ── defaults ───────────────────────────────────────────────────────────────────
 
 DEFAULT_COORDS = 'JAC/samg.matrix.coo'
-
-# XLIM is set at runtime from the mesh coordinates (full domain by default).
-# Override with --xlim xmin xmax.
 XLIM = None
 
 # ── variable maps ──────────────────────────────────────────────────────────────
@@ -86,7 +83,6 @@ LABELS = {
     'turb2': r'$\hat{\nu}_2$',
 }
 
-# Resolvent file prefixes in display order
 ALL_PREFIXES = [
     ('eigf',      'Forcing'),
     ('eigr',      'Response'),
@@ -218,6 +214,15 @@ def positive_norm(data, pct=90):
         vmax = 1.0
     return matplotlib.colors.Normalize(vmin=0.0, vmax=vmax)
 
+# ── colorbar helper ────────────────────────────────────────────────────────────
+
+def add_colorbar(fig, ax, im):
+    """Add a vertical colorbar to the right of the axes."""
+    cb = fig.colorbar(im, ax=ax, orientation='vertical',
+                      pad=0.02, fraction=0.015, aspect=30)
+    cb.ax.tick_params(labelsize=8)
+    return cb
+
 # ── triangulation ──────────────────────────────────────────────────────────────
 
 def build_triangulation(x, y):
@@ -269,9 +274,7 @@ def plot_modes(x, y, mode_data, cmap, output_stem, title_prefix,
             im = ax.tripcolor(triang, arr, cmap=cmap_use, norm=norm,
                               shading='gouraud', rasterized=True)
             ax.set_xlim(*XLIM)
-            cb = fig.colorbar(im, ax=ax, orientation='horizontal',
-                              pad=0.15, fraction=0.03, aspect=50)
-            cb.ax.tick_params(labelsize=8)
+            add_colorbar(fig, ax, im)
             ax.set_title(f'{part_label}  {label}', fontsize=11, loc='left')
             ax.set_xlabel('x', fontsize=9)
             ax.set_ylabel('y', fontsize=9)
@@ -328,9 +331,7 @@ def plot_resolvent(datasets, cmap, dir_path, idx_omega,
                 im = ax.tripcolor(triang, arr, cmap=cmap_use, norm=norm,
                                   shading="gouraud", rasterized=True)
                 ax.set_xlim(*XLIM)
-                cb = fig.colorbar(im, ax=ax, orientation="horizontal",
-                                  pad=0.15, fraction=0.03, aspect=50)
-                cb.ax.tick_params(labelsize=8)
+                add_colorbar(fig, ax, im)
                 ax.set_title(f"{field_label}  {part_label}  {label}",
                              fontsize=11, loc="left")
                 ax.set_xlabel("x", fontsize=9)
@@ -453,14 +454,13 @@ def main():
     if resolvent:
         print(f"  Resolvent directory detected — plotting all available fields.")
 
-    # ── 5. build list of (path, prefix) to process ───────────────────────────
+    # ── 5. build list of paths to process ─────────────────────────────────────
     if args.modes is not None:
         indices   = parse_mode_indices(args.modes)
         work_list = []
         for i in indices:
             fp = find_pval(args.dir, 'eigf', i)
             if fp is None:
-                # try any requested field
                 for prefix, _ in ALL_PREFIXES:
                     if prefix not in args.fields:
                         continue
@@ -512,16 +512,13 @@ def main():
             continue
 
         # ── resolvent mode ─────────────────────────────────────────────────────
-        # item is already a path (the first available file for this index)
         ref_path   = item
         ref_fname  = os.path.splitext(os.path.basename(ref_path))[0]
         ref_prefix = next((p for p, _ in ALL_PREFIXES
                            if ref_fname.startswith(p + '_')), None)
         idx_omega  = ref_fname[len(ref_prefix) + 1:] if ref_prefix else ref_fname
-        # Derive numeric index from filename: eigf_3_2.44j -> 3
         idx = int(idx_omega.split('_')[0])
 
-        # Read reference file just for gridpoints
         gridpoints, _ = read_pval(ref_path, ['u'])
         common = min(len(x), gridpoints)
         xi, yi = x[:common], y[:common]
@@ -536,7 +533,6 @@ def main():
         else:
             print(f"  Reusing cached triangulation ({common} nodes).")
 
-        # Load each requested field
         datasets = []
         for prefix, label in ALL_PREFIXES:
             if prefix not in args.fields:
