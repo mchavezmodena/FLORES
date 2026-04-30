@@ -1,0 +1,38 @@
+# ============================================================
+#  RESOLVENT control file
+#  Usage:  python resolvent.py resolvent.floresparam
+#          mpirun -n 4 python resolvent.py resolvent.floresparam
+# ============================================================
+
+[io]
+input_path  = ./JAC/
+output_path = ./RESULTS_resolvent_test_10/
+
+[physics]
+# Mach number of the base flow
+mach   = 0.1
+# Spanwise wavenumber (beta = 2*pi/Ly). Use 0 for 2D analysis
+beta   = 0
+# Number of spanwise slices (only used if beta != 0)
+nslices = 7
+
+[frequencies]
+# Frequency sweep: omega values are purely imaginary (i*omega)
+# omega_start and omega_end are the imaginary parts (real positive values)
+omega_start = 1
+omega_end   = 1
+# Number of frequencies in the sweep
+omega_n     = 1
+
+[solver]
+# Number of eigenvalues (singular values) requested
+# Size of the Krylov subspace.
+ncv                 = 7
+# SLEPc will converge nev = 3*ncv
+nev               = 2
+# Spectral shift (real). Use 0 for no shift
+shift             = 0.0
+# Compute adjoint modes and structural sensitivity
+# True  -> solves both direct and adjoint problems
+# False -> direct problem only
+compute_sensitivity = True

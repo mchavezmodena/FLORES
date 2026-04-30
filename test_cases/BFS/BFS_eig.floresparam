@@ -1,0 +1,50 @@
+# ============================================================
+#  EIGENSOLVER control file
+#  Usage:  python EIGENSOLVER.py eigensolver.ini
+#          mpirun -n 4 python EIGENSOLVER.py eigensolver.ini
+# ============================================================
+
+[io]
+# Directory containing the Jacobian, volumes and coordinates files
+input_path  = /home/w059/w059589/projects/07_TRANSDIFFUSE/03_Bump/JAC/
+
+# Directory where eigenvalues (.dat) and eigenvectors (.pval) will be written
+# Created automatically if it does not exist
+output_path = ./RESULTS_eig_test_new
+
+# File names inside input_path (defaults shown — change only if non-standard)
+jac_file    = samg.matrix.amg.pval
+vol_file    = samg.matrix.vol
+coord_file  = samg.matrix.coo
+
+
+[physics]
+# Mach number of the base flow
+mach    = 0.1 
+# Spanwise wavenumber (0.0 for a purely 2-D problem)
+beta    = 0.0 
+# Reference length used when reading coordinates (domain reduction only)
+rlength = 1.0 
+
+[solver]
+# Number of eigenvalues to request from SLEPc
+nev = 5
+
+# Spectral shift  (real and imaginary parts stored separately)
+shift_real = -0.25
+shift_imag =  2
+
+# [eps]
+# method: sinvert (default) o feast
+# method         = sinvert
+# Solo para feast:
+# feast_radius   = 0.8
+# feast_ncontour = 8
+
+[checkpoint]
+# Tolerances for detecting duplicate eigenvalues across runs
+# An eigenvalue is considered a duplicate if BOTH conditions are met:
+#   |Re(new) - Re(old)| < dup_tol_real
+#   |Im(new) - Im(old)| < dup_tol_imag
+dup_tol_real = 1e-5 
+dup_tol_imag = 1e-5 
