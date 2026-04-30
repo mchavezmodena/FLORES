@@ -1,7 +1,7 @@
 #! /usr/bin/env python
 #
-# Usage: python EIGENSOLVER.py eigensolver.ini
-#        mpirun -n 4 python EIGENSOLVER.py eigensolver.ini
+# Usage: python eig_simple.py eigensolver.ini
+#        mpirun -n 4 python eig_simple.py eigensolver.ini
 #
 import numpy as np
 import sys, os
@@ -101,9 +101,17 @@ def read_control_file(filepath):
 
     # [solver]
     p['nev']     = cfg.getint  ('solver', 'nev')
-    sr           = cfg.getfloat('solver', 'shift_real')
-    si           = cfg.getfloat('solver', 'shift_imag')
-    p['shift']   = complex(sr, si)
+    # Acepta shift_real/shift_imag separados O shift como complejo directo
+    # Ejemplos: shift_real = -0.25 / shift_imag = 2.0
+    #           shift = -0.25+2.0j
+    if cfg.has_option('solver', 'shift_real'):
+        sr         = cfg.getfloat('solver', 'shift_real')
+        si         = cfg.getfloat('solver', 'shift_imag', fallback=0.0)
+        p['shift'] = complex(sr, si)
+    elif cfg.has_option('solver', 'shift'):
+        p['shift'] = complex(cfg.get('solver', 'shift').strip())
+    else:
+        raise ValueError('El .ini debe definir shift_real/shift_imag o shift en [solver]')
     p['tol']     = cfg.getfloat('solver', 'tol',     fallback=1e-8)
     p['max_it']  = cfg.getint  ('solver', 'max_it',  fallback=15000)
     p['adjoint'] = cfg.getboolean('solver', 'adjoint', fallback=False)
@@ -128,8 +136,7 @@ def read_control_file(filepath):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_previous_eigenvalues(eigv_file):
-    """Read eigenvalues already stored in eigv_file.
-    Returns a list of complex numbers."""
+    """Read eigenvalues already stored in eigv_file."""
     eigs_prev = []
     if not os.path.isfile(eigv_file):
         return eigs_prev
@@ -175,6 +182,7 @@ def next_eigvec_index(results_dir):
 def run_slices(params):
     comm  = MPI.COMM_WORLD
     rank  = comm.Get_rank()
+    nproc = comm.Get_size()
     Print = PETSc.Sys.Print
 
     t_total = time.time()
@@ -194,8 +202,9 @@ def run_slices(params):
     dreduced     = params['dreduced']
     xmin         = params['xmin'];  xmax = params['xmax']
     zmin         = params['zmin'];  zmax = params['zmax']
-    dup_tol_real = params['dup_tol_real']
-    dup_tol_imag = params['dup_tol_imag']
+    dup_tol_real    = params['dup_tol_real']
+    dup_tol_imag    = params['dup_tol_imag']
+
 
     jacfile = os.path.join(input_path, params['jac_file'])
     volfile = os.path.join(input_path, params['vol_file'])
@@ -221,6 +230,9 @@ def run_slices(params):
     Print(' Adjoint     : {0}'.format(adjoint))
     Print(' Generalised : {0}'.format(gen))
     Print(' Dom. reduc. : {0}'.format(dreduced))
+
+    Print(' MPI ranks   : {0}'.format(nproc))
+    Print(' OMP threads : {0}'.format(os.environ.get('OMP_NUM_THREADS', '1')))
     Print(' ========================================')
     Print('')
 
@@ -244,7 +256,7 @@ def run_slices(params):
     file_start_idx = next_eigvec_index(output_path)
     _t(comm, rank, 'Checkpoint load', t0)
 
-    # ── Read Jacobian (rank 0 only, then broadcast) ──────────────────────────
+    # ── Read Jacobian (rank 0 only, then Bcast with MPI buffer protocol) ─────
     t0 = time.time()
     Print(' Reading Jacobian')
     if rank == 0:
@@ -254,29 +266,32 @@ def run_slices(params):
         nnz    = amatrix.nnz
         meta   = np.array([neq, nvars, nnz], dtype=np.int64)
     else:
-        meta   = np.empty(3, dtype=np.int64)
+        meta = np.empty(3, dtype=np.int64)
 
-    # Broadcast scalar metadata first (tiny)
     comm.Bcast(meta, root=0)
     neq, nvars, nnz = int(meta[0]), int(meta[1]), int(meta[2])
 
-    # Allocate buffers on non-root ranks
     if rank == 0:
         indptr_buf  = amatrix.indptr.astype(np.int32)
         indices_buf = amatrix.indices.astype(np.int32)
         data_buf    = amatrix.data.astype(np.complex128)
     else:
-        indptr_buf  = np.empty(nvars + 1,  dtype=np.int32)
-        indices_buf = np.empty(nnz,         dtype=np.int32)
-        data_buf    = np.empty(nnz,         dtype=np.complex128)
+        indptr_buf  = np.empty(nvars + 1, dtype=np.int32)
+        indices_buf = np.empty(nnz,       dtype=np.int32)
+        data_buf    = np.empty(nnz,       dtype=np.complex128)
 
-    # Broadcast the three CSR arrays using MPI buffer protocol (no pickle)
     comm.Bcast(indptr_buf,  root=0)
     comm.Bcast(indices_buf, root=0)
     comm.Bcast(data_buf,    root=0)
 
     amatrix = csr_matrix((data_buf, indices_buf, indptr_buf),
                          shape=(nvars, nvars))
+
+    # Variables locales para ensamblado de PETSc (calculadas post-Bcast)
+    # Se actualizan tras domain_reduction si aplica
+    _amatrix_indptr_local  = None
+    _amatrix_indices_local = None
+    _amatrix_data_local    = None
 
     Print(' Matrix main dimension = {0}'.format(nvars))
     Print(' Number of equations   = {0}'.format(neq))
@@ -285,7 +300,7 @@ def run_slices(params):
 
     gridpoints = int(nvars / neq)
 
-    # ── Mass matrix (rank 0 reads vols, then broadcast) ──────────────────────
+    # ── Mass matrix — vectorizado con numpy (sin list comprehension) ─────────
     t0 = time.time()
     Print(' Reading mass matrix and generating M')
     Print('')
@@ -295,22 +310,23 @@ def run_slices(params):
                                 dtype=np.float64)
         ngp = np.array([len(vols_buf)], dtype=np.int64)
     else:
-        ngp     = np.empty(1, dtype=np.int64)
+        ngp = np.empty(1, dtype=np.int64)
 
     comm.Bcast(ngp, root=0)
     if rank != 0:
         vols_buf = np.empty(int(ngp[0]), dtype=np.float64)
-
     comm.Bcast(vols_buf, root=0)
 
-    one     = 1. + 0j
+    # Vectorizado: np.repeat es O(n) en C, 10-50x mas rapido que list comprehension
     bmatrix = identity(nvars, dtype='c16', format='csr')
-    bmatrix.data[:] = [vols_buf[i // neq] * one for i in range(nvars)]
+    bmatrix.data[:] = np.repeat(vols_buf, neq).astype(np.complex128)
     _t(comm, rank, 'Mass matrix build', t0)
-    
+
     # ── Domain reduction ─────────────────────────────────────────────────────
     t0 = time.time()
     if dreduced:
+        # domain_reduction necesita la matriz completa — ya fue reconstruida
+        # en la seccion de Jacobian read cuando dreduced=True
         Print(' Applying domain reduction')
         Print(' XMIN/XMAX = {0}/{1}'.format(xmin, xmax))
         Print(' ZMIN/ZMAX = {0}/{1}'.format(zmin, zmax))
@@ -326,14 +342,24 @@ def run_slices(params):
         localid = np.arange(0, gridpoints, 1, dtype='i4')
         localid = np.repeat(localid, neq)
         rgid = dr.reduce_vector(localid)[0::neq].astype(int)
+
         Print('')
     else:
         rgid = None
         n    = nvars
     _t(comm, rank, 'Domain reduction', t0)
 
-    # ── Assemble PETSc matrix A ──────────────────────────────────────────────
+    # ── Assemble PETSc matrix A (setValuesCSR — bulk insert) ─────────────────
     t0 = time.time()
+
+    # Nota: MUMPS lee OMP_NUM_THREADS del entorno automaticamente.
+    # No se pasan opciones mat_mumps_* desde Python para evitar dependencia
+    # de SLURM y el problema de "unused options" en PETSc 3.25.
+    # Configura el paralelismo via variables de entorno en el job script:
+    #   export OMP_NUM_THREADS=N
+    #   export OMP_PROC_BIND=close
+    #   export OMP_PLACES=cores
+
     A = PETSc.Mat()
     A.create(PETSc.COMM_WORLD)
     A.setSizes([n, n])
@@ -352,16 +378,19 @@ def run_slices(params):
     A.assemble()
     _t(comm, rank, 'PETSc matrix A assembly', t0)
 
-    # ── Assemble PETSc matrix B ──────────────────────────────────────────────
+    # ── Assemble PETSc matrix B — vectorizado con setDiagonal ────────────────
     t0 = time.time()
     B = PETSc.Mat()
     B.create(PETSc.COMM_WORLD)
     B.setSizes([n, n])
     B.setFromOptions()
     B.setUp()
+
+    # setDiagonal es una sola llamada C en lugar de un bucle Python fila a fila
     rstart, rend = B.getOwnershipRange()
-    for pt in range(rstart, rend):
-        B[pt, pt] = bmatrix.data[pt]
+    diag_vals    = bmatrix.data[rstart:rend].astype(PETSc.ScalarType)
+    diag_vec     = PETSc.Vec().createWithArray(diag_vals, comm=PETSc.COMM_WORLD)
+    B.setDiagonal(diag_vec)
     B.assemble()
     _t(comm, rank, 'PETSc matrix B assembly', t0)
 
@@ -398,17 +427,6 @@ def run_slices(params):
     pc.setType('lu')
     pc.setFactorSolverType('mumps')
 
-    opts = PETSc.Options("mat_mumps_")
-    opts["icntl_7"]  = 3    # ordering: 3=Scotch, 4=METIS — prueba ambos
-    opts["icntl_6"]  = 5    # column permutation más agresiva
-    opts["icntl_4"]  = 1    # verbosity
-    opts["icntl_14"] = 80   # aumentar workspace al 80% — reduce OOM y reruns
-    opts["icntl_23"] = 8000 # memoria máxima por proceso en MB (ajusta según RAM disponible)
-    opts["icntl_28"] = 2    # ordering paralelo
-    opts["icntl_29"] = 1    # 1=ParMETIS, 2=PT-Scotch
-    opts["cntl_3"]   = 1e-6
-    # quitar icntl_10, icntl_11 — el análisis de error añade coste sin beneficio
-
     E.setTolerances(tol=tol, max_it=max_it)
     E.setDimensions(nev, ncv, mpd)
     E.setWhichEigenpairs(E.Which.TARGET_MAGNITUDE)
@@ -427,6 +445,7 @@ def run_slices(params):
         print(' Number of eigenvalues requested = ', nev)
         print(' Number of column vectors        = ', ncv)
         print(' Maximum dimension (mpd)         = ', mpd)
+        print(' OMP threads (OMP_NUM_THREADS)   = ', os.environ.get('OMP_NUM_THREADS', '1'))
         print('')
 
     # ── EPS solve ────────────────────────────────────────────────────────────
@@ -437,14 +456,12 @@ def run_slices(params):
     # ── Post-processing ──────────────────────────────────────────────────────
     its                  = E.getIterationNumber()
     tol_out, max_it_out  = E.getTolerances()
-    ksp_its              = K.getIterationNumber()
     nconv                = E.getConverged()
 
     if rank == 0:
         print('')
         print(' Iterations (EPS)  : ', its)
         print(' Tolerance / max_it: ', tol_out, ' / ', max_it_out)
-        print(' Iterations (KSP)  : ', ksp_its)
         print(' Requested         : ', nev)
         print(' Converged         : ', nconv)
 
@@ -486,7 +503,8 @@ def run_slices(params):
             if rank == 0:
                 mode2pval(eigvecfile, eigenvec, nvars, n, neq, beta, dreduced, rgid)
                 if beta != 0:
-                    mode2pval3D(eigvecfile, eigenvec, nvars, n, neq, beta, 21, dreduced, rgid)
+                    mode2pval3D(eigvecfile, eigenvec, nvars, n, neq, beta, 21,
+                                dreduced, rgid)
 
             new_eigs.append(k)
             file_idx += 1
@@ -520,8 +538,8 @@ def run_slices(params):
 if __name__ == "__main__":
 
     if len(sys.argv) < 2:
-        print('Usage: python EIGENSOLVER.py <control_file.ini>')
-        print('       mpirun -n 4 python EIGENSOLVER.py <control_file.ini>')
+        print('Usage: python eig_simple.py <control_file.ini>')
+        print('       mpirun -n 4 python eig_simple.py <control_file.ini>')
         sys.exit(1)
 
     ctrl_file = sys.argv[1]
