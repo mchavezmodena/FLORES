@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+#SBATCH --job-name=flores_build
+#SBATCH --time=20:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --mem=16G
+#SBATCH --chdir=.
+#SBATCH --output=build_logs_%J.out
+#SBATCH --error=build_logs_%J.err
+#SBATCH --partition=standard
 set -e
 
 ### ------------------------------------------------------------
