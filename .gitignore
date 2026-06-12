@@ -1,0 +1,4 @@
+./python_env_installation
+!./python_env_installation/Cesvima_UPM_Installation_ompi.sh
+!./python_env_installation/Cesvima_UPM_Installation.sh
+!./python_env_installation/Ubuntu_Installation.sh
