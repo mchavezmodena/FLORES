@@ -4,3 +4,6 @@ python_env_installation/*
 !python_env_installation/Ubuntu_Installation.sh
 test_cases/*
 !test_cases/*.floresparam
+*.pyc
+solver/__pycache__/*
+to-ignore/*
