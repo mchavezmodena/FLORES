@@ -2,7 +2,8 @@
 
 from netCDF4 import Dataset
 import numpy as np
-from scipy.sparse import csr_matrix
+import h5py
+from scipy.sparse import csr_matrix, csc_matrix
 import sys,os
 import pdb
 
@@ -37,6 +38,27 @@ def openjacobian(jacfile):
     mjac = csr_matrix((data, col_ind, row_ptr), shape=(n,n))
     mjac.eliminate_zeros()
     return mjac, neq
+
+def open_sod2d_jacobian(jacfile):
+    # read from SOD2D's WIP hdf format
+
+    f = h5py.File(jacfile,'r')
+
+    col_ptr = np.array(f['col_ptr'][:],dtype=np.int32)
+    row_ind = np.array(f['row_ind'][:],dtype=np.int32)
+    values = np.array(f['values'][:],dtype=np.float64)
+    coords = np.array(f['node_coords'][:],dtype=np.float64)
+
+    n = len(col_ptr)-1
+    numpoints = np.shape(coords)[0]
+
+    neq = n/numpoints # number of eqs = number of points / number of degrees of freedom
+
+    mjac = csr_matrix((values,row_ind,col_ptr))
+    mjac.eliminate_zeros()
+
+    return mjac, neq
+
 
 # -------------------------------------------------------------------- #
 
@@ -182,6 +204,43 @@ def read_coordinates(coordfile, rlength, beta):
     new_data = np.repeat(coord, neq + 1, axis=0)   # shape (gridpoints*(neq+1), ndim)
 
     return new_data
+
+def read_sod2d_coordinates(coordfile, rlength, beta):
+    """Read coordinates from sod2d hdf5 file.
+
+    Uses h5py to read the coordinates from SOD2D.
+    """
+    print(' READING COORDINATES FROM SOD2D OUTPUT FILE: ', coordfile)
+
+    f = h5py.File(coordfile,'r')
+    coords = np.array(f['node_coords'][:],dtype=np.float64)
+    coords *= rlength
+
+    # SOD2D's output format prints each node only once, so no need to remove duplicate coords like TAU
+    neq = 5
+
+    # Expand: each grid point repeated (neq+1) times — pure numpy, no loop
+    new_data = np.repeat(coords, neq+1, axis=0)   # shape (gridpoints*(neq+1), ndim)
+
+    return new_data
+
+def dump_sod2d_coordinates(filename, coords, neq):
+    """
+    Dump the coords read from SOD2D to an output file matching the
+    .coo format from TAU
+
+    This makes visualisation easier later
+    """
+    print('DUMPING SOD2D COORDS TO FILE: ', filename)
+
+    with open(filename,"w") as f:
+        coords_shape = np.shape(coords)
+        f.write(f"{coords_shape[0]} {coords_shape[1]} \n")
+        for i in range(0, coords_shape[0]):
+            # visualiser expects coords to be repeated neq times
+            for j in range(0, neq):
+            f.write(f"{coords_shape[i,0]} {coords_shape[i,1]} {coords_shape[i,2]} \n")
+
 
 # -------------------------------------------------------------------- #
 
