@@ -11,7 +11,7 @@ from scipy.sparse import csr_matrix, linalg as sla, identity
 
 from jac_red import domain_reduction
 from save2pval import mode2pval, mode2pval3D
-from input_output import openjacobian, read_coordinates
+from input_output import openjacobian, read_coordinates, open_sod2d_jacobian, read_sod2d_coordinates, dump_sod2d_coordinates
 
 import petsc4py
 import slepc4py
@@ -95,6 +95,8 @@ def read_control_file(filepath):
     p['jac_file']    = cfg.get('io', 'jac_file',   fallback='samg.matrix.amg.pval').strip()
     p['vol_file']    = cfg.get('io', 'vol_file',   fallback='samg.matrix.vol').strip()
     p['coord_file']  = cfg.get('io', 'coord_file', fallback='samg.matrix.coo').strip()
+    p['sod2d_dumpfile'] = cfg.get('io', 'sod2d_dumpfile', fallback='samg.matrix.coo').strip()
+    p['simulator']   = cfg.get('io', 'simulator', fallback='tau').strip()
 
     # [physics]
     p['mach']    = cfg.getfloat('physics', 'mach')
@@ -374,6 +376,7 @@ def run_slices(params):
     # ── Unpack parameters ────────────────────────────────────────────────────
     input_path   = params['input_path']
     output_path  = params['output_path']
+    simulator    = params['simulator']
     mach         = params['mach']
     beta         = params['beta']
     rlength      = params['rlength']
@@ -392,6 +395,8 @@ def run_slices(params):
     dup_tol_real = params['dup_tol_real']
     dup_tol_imag = params['dup_tol_imag']
 
+    is_simulator_sod2d = (simulator.replace(" ","") == 'sod2d')
+
     # Sensitivity requires both direct and adjoint modes
     if sensitivity and not adjoint:
         if rank == 0:
@@ -402,6 +407,9 @@ def run_slices(params):
     jacfile = os.path.join(input_path, params['jac_file'])
     volfile = os.path.join(input_path, params['vol_file'])
     coofile = os.path.join(input_path, params['coord_file'])
+
+    sod2d_dumpfile = os.path.join(output_path, params['sod2d_dumpfile'])
+
 
     fac = 1. / (mach * np.sqrt(1.4))
 
@@ -457,7 +465,10 @@ def run_slices(params):
     t0 = time.time()
     Print(' Reading Jacobian')
     if rank == 0:
-        amatrix, neq = openjacobian(jacfile)
+        if(is_simulator_sod2d):
+            amatrix, neq = open_sod2d_jacobian(jacfile)
+        else:
+            amatrix, neq = openjacobian(jacfile)
         amatrix.data *= fac
         nvars  = amatrix.shape[0]
         nnz    = amatrix.nnz
@@ -496,9 +507,12 @@ def run_slices(params):
     Print(' Reading mass matrix and generating M')
     Print('')
     if rank == 0:
-        with open(volfile, 'r') as f:
-            vols_buf = np.array([float(line) for line in f.readlines()],
-                                dtype=np.float64)
+        if(is_simulator_sod2d):
+            vols_buf = np.repeat(1,nvars).astype(np.float64)
+        else:
+            with open(volfile, 'r') as f:
+                vols_buf = np.array([float(line) for line in f.readlines()],
+                                    dtype=np.float64)
         ngp = np.array([len(vols_buf)], dtype=np.int64)
     else:
         ngp = np.empty(1, dtype=np.int64)
@@ -509,7 +523,8 @@ def run_slices(params):
     comm.Bcast(vols_buf, root=0)
 
     bmatrix = identity(nvars, dtype='c16', format='csr')
-    bmatrix.data[:] = np.repeat(vols_buf, neq).astype(np.complex128)
+    if(not is_simulator_sod2d):
+        bmatrix.data[:] = np.repeat(vols_buf, neq).astype(np.complex128)
     _t(comm, rank, 'Mass matrix build', t0)
 
     # ── Domain reduction — rank 0 only, then broadcast ──────────────────────
@@ -520,7 +535,10 @@ def run_slices(params):
         Print(' ZMIN/ZMAX = {0}/{1}'.format(zmin, zmax))
 
         if rank == 0:
-            coord = read_coordinates(coofile, rlength, beta)
+            if(is_simulator_sod2d):
+                coord = read_sod2d_coordinates(coofile, rlength, beta)
+            else:
+                coord = read_coordinates(coofile, rlength, beta)
             dr = domain_reduction(zmin, zmax, xmin, xmax)
             dr.create_Pmatrix(coord)
 
@@ -578,10 +596,19 @@ def run_slices(params):
 
         n    = n_red
         rgid = rgid.astype(int)
+        # ────── Dump coords to .coo if using SOD2D ───────────────────────────────
+        if(is_simulator_sod2d and rank==0):
+            coord = read_sod2d_coordinates(coofile, rlength, beta)
+            dump_sod2d_coordinates(sod2d_dumpfile, coord, 5, dr.kept_idx)
     else:
         rgid = None
         n    = nvars
+        if(is_simulator_sod2d and rank==0):
+            coord = read_sod2d_coordinates(coofile, rlength, beta)
+            dump_sod2d_coordinates(sod2d_dumpfile, coord, 5)
     _t(comm, rank, 'Domain reduction', t0)
+
+
 
     # ── Assemble PETSc matrices ──────────────────────────────────────────────
     t0 = time.time()
