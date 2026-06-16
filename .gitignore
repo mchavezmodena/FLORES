@@ -1,9 +1,20 @@
+# Build files and python envs
 python_env_installation/*
 !python_env_installation/Cesvima_UPM_Installation_ompi.sh
 !python_env_installation/Cesvima_UPM_Installation.sh
 !python_env_installation/Ubuntu_Installation.sh
+
+# Files generated when running test cases or plotting
 test_cases/*
 !test_cases/*.floresparam
+
+*.dat
+*.png
+*.pval
+*.coo
+tools/*.sh
+
+# Misc.
 *.pyc
-solver/__pycache__/*
+**/__pycache__/ 
 to-ignore/*
