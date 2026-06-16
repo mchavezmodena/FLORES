@@ -692,9 +692,9 @@ def tris_info(triang):
 
 def print_usage_and_exit(error_msg=None):
     """Print a concise usage guide and exit."""
+    print(__doc__)
     if error_msg:
         print(f"\n  ERROR: {error_msg}\n", file=sys.stderr)
-    print(__doc__)
     sys.exit(1 if error_msg else 0)
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -720,6 +720,7 @@ def parse_args():
     p.add_argument('--jac', default='JAC',
                    help='Path to the JAC directory containing samg.matrix.coo '
                         '(default: JAC)')
+    p.add_argument('--neq', default=4, help='Number of equations in the system, equivalent to degrees of freedom per node. (default: 4)')
 
     p.add_argument('--mesh', default=None,
                    help='TAU NetCDF mesh file. E.g. --mesh MESH/BFS_h4_2D.taumesh')
@@ -769,7 +770,10 @@ def main():
     # Show help / usage when requested or when called with no arguments
     if args.help or (not args.pval and not args.modes
                      and not args.check_mesh):
-        print_usage_and_exit()
+        if(args.help):
+            print_usage_and_exit()
+        else:
+            print_usage_and_exit(f"You must specify at least one of pval, modes, check_mesh. Values are:\n pval:{args.pval} modes:{args.modes} check_mesh:{args.check_mesh}")
 
     # ── 1. coordinates ─────────────────────────────────────────────────────────
     print(f"\n── Loading coordinates ─────────────────────────────────────────")
@@ -787,7 +791,7 @@ def main():
                 f"--mesh for a TAU mesh."
             )
     else:
-        x, y = load_coo(coords_path, neq=4)
+        x, y = load_coo(coords_path, neq=int(args.neq))
 
     # Load TAU mesh for triangulation and body contour (optional)
     if args.mesh is not None:
