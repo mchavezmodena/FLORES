@@ -52,9 +52,10 @@ def open_sod2d_jacobian(jacfile):
     n = len(col_ptr)-1
     numpoints = np.shape(coords)[0]
 
-    neq = n/numpoints # number of eqs = number of points / number of degrees of freedom
+    neq = n/numpoints # number of eqs = number of degrees of freedom / number of nodes
 
-    mjac = csr_matrix((values,row_ind,col_ptr))
+    mjac = csc_matrix((values,row_ind,col_ptr))
+    mjac = mjac.tocsr()
     mjac.eliminate_zeros()
 
     return mjac, neq
@@ -216,30 +217,29 @@ def read_sod2d_coordinates(coordfile, rlength, beta):
     coords = np.array(f['node_coords'][:],dtype=np.float64)
     coords *= rlength
 
-    # SOD2D's output format prints each node only once, so no need to remove duplicate coords like TAU
     neq = 5
 
-    # Expand: each grid point repeated (neq+1) times — pure numpy, no loop
-    new_data = np.repeat(coords, neq+1, axis=0)   # shape (gridpoints*(neq+1), ndim)
+    new_data = np.repeat(coords, neq, axis=0)   # shape (gridpoints*(neq+1), ndim)
 
     return new_data
 
-def dump_sod2d_coordinates(filename, coords, neq):
+def dump_sod2d_coordinates(filename: str, coords: np.ndarray, neq: int, kept_idx = None):
     """
     Dump the coords read from SOD2D to an output file matching the
     .coo format from TAU
 
     This makes visualisation easier later
     """
-    print('DUMPING SOD2D COORDS TO FILE: ', filename)
-
+    print(' DUMPING SOD2D COORDS TO FILE: ', filename)
+    if(type(kept_idx) is np.ndarray):
+        new_coords = coords[kept_idx,:]
+    else:
+        new_coords = coords
     with open(filename,"w") as f:
-        coords_shape = np.shape(coords)
+        coords_shape = np.shape(new_coords)
         f.write(f"{coords_shape[0]} {coords_shape[1]} \n")
         for i in range(0, coords_shape[0]):
-            # visualiser expects coords to be repeated neq times
-            for j in range(0, neq):
-            f.write(f"{coords_shape[i,0]} {coords_shape[i,1]} {coords_shape[i,2]} \n")
+            f.write(f"{new_coords[i,0]} {new_coords[i,1]} {new_coords[i,2]} \n")
 
 
 # -------------------------------------------------------------------- #
