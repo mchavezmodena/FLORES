@@ -522,6 +522,7 @@ def run_slices(params):
         vols_buf = np.empty(int(ngp[0]), dtype=np.float64)
     comm.Bcast(vols_buf, root=0)
 
+    # TODO had a 0.01 multiplying identity mat here - find out why
     bmatrix = identity(nvars, dtype='c16', format='csr')
     if(not is_simulator_sod2d):
         bmatrix.data[:] = np.repeat(vols_buf, neq).astype(np.complex128)
@@ -705,7 +706,7 @@ def run_slices(params):
             scatter, eigenvec = PETSc.Scatter.toZero(xr)
             scatter.scatter(xr, eigenvec, False, PETSc.Scatter.Mode.FORWARD)
             if rank == 0:
-                mode2pval(eigvecfile, eigenvec, nvars, n, neq, beta, dreduced, rgid)
+                mode2pval(eigvecfile, eigenvec, nvars, n, neq, beta, dreduced, rgid, is_simulator_sod2d)
                 if beta != 0:
                     mode2pval3D(eigvecfile, eigenvec, nvars, n, neq, beta, 21,
                                 dreduced, rgid)

@@ -25,13 +25,22 @@ def _write_var(nc, name, first_half, second_half=None):
     nc.variables[name][gp:] = first_half if second_half is None else second_half
 
 
-def _unpack_sol(sol, neq):
+def _unpack_sol(sol, neq, is_simulator_sod2d):
     """
     Unpack a flat complex solution vector into per-variable arrays via
     strided slicing (no Python loops).
 
     Returns a dict with keys: rho, u, w, e, [turb1], [turb2]
     """
+    if(is_simulator_sod2d):
+        d = {
+        'rho':  sol[0::neq],
+        'u':    sol[1::neq],
+        'v':    sol[2::neq],
+        'w':    sol[3::neq],
+        'e':    sol[4::neq],
+        }
+        return d   
     d = {
         'rho':  sol[0::neq],
         'u':    sol[1::neq],
@@ -181,7 +190,7 @@ def sol2pval(filename, gid, sol, npoints, neq, dreduced=False, rgid=None):
 ############################################################################
 
 def mode2pval(filename, sol, npoints, nred, neq, beta=0.0,
-              dreduced=False, rgid=None):
+              dreduced=False, rgid=None, is_simulator_sod2d=False):
     """
     Write a complex global mode to a TAU-compatible netCDF .pval file.
 
@@ -201,7 +210,7 @@ def mode2pval(filename, sol, npoints, nred, neq, beta=0.0,
         sol = sol.getArray()
     sol = np.asarray(sol, dtype=np.complex128)
 
-    vars_red = _unpack_sol(sol, neq)   # dict: rho, u, w, e, [turb1, turb2]
+    vars_red = _unpack_sol(sol, neq, is_simulator_sod2d)   # dict: rho, u, w, e, [turb1, turb2]
 
     gridpoints_out = npoints // neq    # full mesh size for output file
 
@@ -211,6 +220,7 @@ def mode2pval(filename, sol, npoints, nred, neq, beta=0.0,
     amg_f.createVariable('global_id', 'i', ('no_of_points',))
     amg_f.variables['global_id'][:] = np.arange(gridpoints_out * 2, dtype='i4')
 
+    
     base_vars = ['rho', 'u', 'w', 'e']
     turb_vars = []
     if neq >= 5:
@@ -218,7 +228,10 @@ def mode2pval(filename, sol, npoints, nred, neq, beta=0.0,
     if neq >= 6:
         turb_vars.append('turb2')
     all_vars = base_vars + turb_vars
-
+    if(is_simulator_sod2d):
+        base_vars = ['rho', 'u', 'v', 'w', 'e']
+        turb_vars = []
+        all_vars = base_vars + turb_vars
     if dreduced:
         # Scatter reduced-domain values into full-size arrays
         for vname in all_vars:
