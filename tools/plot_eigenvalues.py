@@ -2,26 +2,24 @@
 """
 plot_eigenvalues.py
 -------------------
-Visualiza autovalores en el plano complejo a partir de uno o varios ficheros.
+Visualiza autovalores en el plano complejo a partir de uno o varios directorios
+o ficheros .dat.
 
-Formato del fichero de entrada (3 columnas separadas por espacios):
-  <índice>   <parte_real>   <parte_imaginaria>
+Formato del fichero (3 columnas):  <índice>   <Re>   <Im>
 
 Uso:
-  python plot_eigenvalues.py fichero1.dat
-  python plot_eigenvalues.py fichero1.dat fichero2.dat fichero3.dat
+  python plot_eigenvalues.py DIR1/ DIR2/ DIR3/
+  python plot_eigenvalues.py fichero1.dat fichero2.dat
   python plot_eigenvalues.py *.dat --label-every 5
 
-Salida:
-  1 fichero  -> mismo nombre con extensión .png (junto al fichero de entrada)
-  2+ ficheros -> eigv_comparison.png en el directorio de trabajo actual
+Salida (siempre se generan dos figuras, con y sin números de índice):
+  1 entrada  -> <nombre>.png  y  <nombre>_nolabels.png
+  2+ entradas -> eigv_comparison.png  y  eigv_comparison_nolabels.png
+                 (en el directorio de trabajo actual)
 """
 
-import os
-import sys
-import argparse
+import os, sys, argparse
 
-# ── Acelerar matplotlib: evitar escaneo de fuentes y display ─────────────────
 os.environ.setdefault("MPLBACKEND", "Agg")
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
@@ -30,7 +28,7 @@ import matplotlib
 matplotlib.use("Agg")
 matplotlib.rcParams.update({
     "font.family":      "sans-serif",
-    "font.sans-serif":  ["DejaVu Sans"],   # fuente embebida en matplotlib, sin búsqueda
+    "font.sans-serif":  ["DejaVu Sans"],
     "axes.facecolor":   "#ffffff",
     "figure.facecolor": "#ffffff",
     "axes.edgecolor":   "#333333",
@@ -44,19 +42,37 @@ matplotlib.rcParams.update({
 })
 
 import matplotlib.pyplot as plt
-import matplotlib.patheffects as pe
 from pathlib import Path
 
-COLORS = [
-    "#3a86ff", "#e05c00", "#2e7d32", "#9b2226",
-    "#6a0dad", "#007b7b", "#b5540a", "#1a1a6e",
-    "#555555", "#c2185b",
-]
+# Colores y marcadores: 1er dataset, 2do, 3ro, ... (cíclico si hay más de 3)
+COLORS   = ["#3a86ff", "#e05c00", "#2e7d32", "#9b2226", "#6a0dad",
+            "#007b7b", "#b5540a", "#1a1a6e", "#555555", "#c2185b"]
+
+# marker, facecolor ('full' = relleno con color, 'none' = sin relleno)
+MARKERS  = [("o", "full"), ("o", "none"), ("^", "none"),
+            ("s", "none"), ("D", "none"), ("v", "none")]
+
 AXIS_COLOR = "#333333"
 GRID_COLOR = "#cccccc"
+EIGV_FILE  = "eigv_DIR.dat"
 
 
 # ─── I/O ─────────────────────────────────────────────────────────────────────
+
+def resolve_path(arg):
+    """Acepta directorio o fichero. Si es directorio busca eigv_DIR.dat dentro."""
+    p = Path(arg)
+    if p.is_dir():
+        f = p / EIGV_FILE
+        if not f.exists():
+            print(f"[ERROR] No se encuentra {f}", file=sys.stderr)
+            sys.exit(1)
+        return f
+    if not p.exists():
+        print(f"[ERROR] No existe: {p}", file=sys.stderr)
+        sys.exit(1)
+    return p
+
 
 def load_eigenvalues(filepath):
     data = np.loadtxt(filepath, usecols=(0, 1, 2))
@@ -67,8 +83,9 @@ def load_eigenvalues(filepath):
 
 # ─── Plot ─────────────────────────────────────────────────────────────────────
 
-def plot_eigenvalues(datasets, figsize=(13, 10), dpi=150,
-                     label_fontsize=6.5, label_every=1):
+def build_figure(datasets, figsize, dpi, label_fontsize, label_every,
+                 show_labels):
+    """Construye la figura. show_labels controla si se dibujan los índices."""
 
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
 
@@ -79,20 +96,31 @@ def plot_eigenvalues(datasets, figsize=(13, 10), dpi=150,
 
     for k, (fpath, indices, reals, imags) in enumerate(datasets):
         color = COLORS[k % len(COLORS)]
-        ax.scatter(imags, reals,
-                   color=color, edgecolors=color,
-                   s=40, linewidths=0.6, alpha=0.85,
-                   zorder=4, label=Path(fpath).parent.name)
+        marker, fillstyle = MARKERS[k % len(MARKERS)]
 
-        for i, (idx, rx, im) in enumerate(zip(indices, reals, imags)):
-            if i % label_every != 0:
-                continue
-            ax.annotate(
-                str(idx), xy=(im, rx),
-                xytext=(4, 4), textcoords="offset points",
-                fontsize=label_fontsize, color=color, alpha=0.9, zorder=5,
-                path_effects=[pe.withStroke(linewidth=1.8, foreground="white")],
-            )
+        raw = Path(fpath).parent.name
+        label = raw[len("RESULTS_eig_"):] if raw.startswith("RESULTS_eig_") else \
+                raw[len("RESULTS_eig"):]  if raw.startswith("RESULTS_eig")  else raw
+
+        if fillstyle == "full":
+            facecolor = color
+        else:
+            facecolor = "none"
+
+        ax.scatter(imags, reals,
+                   marker=marker,
+                   facecolors=facecolor,
+                   edgecolors=color,
+                   s=45, linewidths=1.2, alpha=0.9,
+                   zorder=4, label=label)
+
+        if show_labels and label_every > 0:
+            mask = np.arange(len(indices)) % label_every == 0
+            for idx, rx, im in zip(indices[mask], reals[mask], imags[mask]):
+                ax.text(im, rx, str(idx),
+                        fontsize=label_fontsize, color=color,
+                        alpha=0.9, zorder=5,
+                        ha="left", va="bottom")
 
         all_im.append(imags)
         all_re.append(reals)
@@ -103,33 +131,49 @@ def plot_eigenvalues(datasets, figsize=(13, 10), dpi=150,
     pad_y  = max(0.05 * (all_re.max() - all_re.min()), 0.05)
 
     ax.set_xlim(all_im.min() - pad_x, all_im.max() + pad_x)
-    ax.set_ylim(all_re.max() + pad_y, all_re.min() - pad_y)  # Y invertido
+    # ax.set_ylim(all_re.max() + pad_y, all_re.min() - pad_y)
 
-    ax.set_xlabel("Im(λ)", fontsize=20, labelpad=10)
-    ax.set_ylabel("Re(λ)", fontsize=20, labelpad=10)
-    ax.tick_params(axis="both", labelsize=13)
+    ax.set_xlabel(r"$\sigma_i = 2 \pi St$", fontsize=22, labelpad=12)
+    ax.set_ylabel(r"$-\sigma_r $", fontsize=22, labelpad=12)
+    ax.tick_params(axis="both", labelsize=16)
     ax.grid(True)
 
-    if len(datasets) > 1:
-        ax.legend(fontsize=20, framealpha=0.9, edgecolor=GRID_COLOR, loc="upper right")
+    ax.legend(fontsize=11, framealpha=0.9, edgecolor=GRID_COLOR, loc="best")
 
-    # Nombre de salida
+    return fig
+
+
+def plot_eigenvalues(datasets, figsize=(13, 10), dpi=150,
+                     label_fontsize=6.5, label_every=1):
+
     if len(datasets) == 1:
-        out = Path(datasets[0][0]).with_suffix(".png")
+        base = Path(datasets[0][0]).with_suffix("")
     else:
-        out = Path("eigv_comparison.png")
+        base = Path("eigv_comparison")
 
-    fig.savefig(out, dpi=dpi)
-    print(f"  [OK] Figura guardada en: {out}")
+    # Figura con números de índice
+    fig = build_figure(datasets, figsize, dpi, label_fontsize, label_every,
+                       show_labels=True)
+    out_labels = base.with_suffix(".png")
+    fig.savefig(out_labels, dpi=dpi)
     plt.close(fig)
+    print(f"  [OK] Figura guardada en: {out_labels}")
+
+    # Figura sin números de índice
+    fig = build_figure(datasets, figsize, dpi, label_fontsize, label_every,
+                       show_labels=False)
+    out_nolabels = Path(str(base) + "_nolabels.png")
+    fig.savefig(out_nolabels, dpi=dpi)
+    plt.close(fig)
+    print(f"  [OK] Figura guardada en: {out_nolabels}")
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────────────
 
 def parse_args():
     p = argparse.ArgumentParser(description="Visualiza autovalores en el plano complejo.")
-    p.add_argument("--ficheros", nargs="+",
-                   help="Uno o varios ficheros .dat (índice  Re  Im)")
+    p.add_argument("entradas", nargs="+",
+                   help="Directorios o ficheros .dat")
     p.add_argument("--figsize", nargs=2, type=float, default=[13, 10],
                    metavar=("W", "H"))
     p.add_argument("--dpi", type=int, default=150)
@@ -141,15 +185,12 @@ def parse_args():
 def main():
     args = parse_args()
     datasets = []
-    for f in args.ficheros:
-        path = Path(f)
-        if not path.exists():
-            print(f"[ERROR] No existe: {f}", file=sys.stderr)
-            sys.exit(1)
+    for entrada in args.entradas:
+        path = resolve_path(entrada)
         print(f"  Leyendo: {path}")
         indices, reals, imags = load_eigenvalues(str(path))
         print(f"    -> {len(indices)} autovalores")
-        datasets.append((str(path), indices, reals, imags))
+        datasets.append((str(path), indices, -reals, imags))
 
     plot_eigenvalues(datasets,
                      figsize=tuple(args.figsize),

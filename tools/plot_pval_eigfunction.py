@@ -100,6 +100,7 @@ YLIM           = None
 
 # ── variable maps ──────────────────────────────────────────────────────────────
 
+# Note: 'Umag' is computed as sqrt(u^2 + w^2), not read directly from file
 VAR_MAP = {
     'rho':   ('rho',   'rho_i'),
     'u':     ('u',     'u_i'),
@@ -111,6 +112,7 @@ VAR_MAP = {
 }
 
 LABELS = {
+    'Umag': r'$|\hat{U}|$',
     'rho':   r'$\hat{\rho}$',
     'u':     r'$\hat{u}$',
     'w':     r'$\hat{w}$',
@@ -127,12 +129,31 @@ ALL_PREFIXES = [
     ('sensitivity', 'Sensitivity'),
 ]
 
+PREFIX_LABEL = dict(ALL_PREFIXES)
+
+# Labels for single-file (non-resolvent) eigenmode plots
+SINGLE_PREFIX_LABEL = {
+    'eigf':        'Direct',
+    'eiga':        'Adjoint',
+    'eigr':        'Response',
+    'sensitivity': 'Sensitivity',
+}
+
 SKIP_VARS_FOR = {
     'eiga':        {'rho', 'e'},
     'sensitivity': {'rho', 'e'},
 }
 
 # ── coordinate loader (.coo) ───────────────────────────────────────────────────
+
+def peek_pval_gridpoints(path):
+    """Read gridpoints from a .pval file without loading all data."""
+    try:
+        with Dataset(path, 'r') as ds:
+            return len(ds.dimensions['no_of_points']) // 2
+    except Exception:
+        return None
+
 
 def load_coo(path, neq):
     print(f"  Reading: {path}")
@@ -246,34 +267,55 @@ def _remap_triangulation(x_coo, y_coo, x_tau, y_tau, triang_tau):
     """
     Remap a TAU triangulation to the .coo node ordering.
 
-    Builds a KDTree on (x_tau, y_tau) and finds, for each .coo node,
-    the nearest TAU node.  Then remaps the triangle connectivity from
-    TAU indices to .coo indices.
+    Handles meshes in different units (e.g. TAU in dimensional units,
+    .coo in adimensional units) by auto-detecting a uniform scale factor
+    from the bounding box ratio before building the KDTree.
 
-    Returns a new Triangulation in .coo node space, or None on failure.
+    Returns a new Triangulation in .coo node space.
     """
     print(f"  Remapping TAU triangulation to .coo node order …", flush=True)
-    tree = cKDTree(np.column_stack((x_tau, y_tau)))
+
+    # ── Auto-detect scale factor ──────────────────────────────────────────────
+    range_coo_x = x_coo.max() - x_coo.min()
+    range_tau_x = x_tau.max() - x_tau.min()
+    range_coo_y = y_coo.max() - y_coo.min()
+    range_tau_y = y_tau.max() - y_tau.min()
+
+    scale_x = range_coo_x / range_tau_x if range_tau_x > 0 else 1.0
+    scale_y = range_coo_y / range_tau_y if range_tau_y > 0 else 1.0
+
+    # Use uniform scale if x and y ratios agree within 1%
+    if abs(scale_x - scale_y) / max(scale_x, 1e-10) < 0.01:
+        scale = (scale_x + scale_y) / 2.0
+    else:
+        scale = 1.0   # fallback: no scaling
+
+    if abs(scale - 1.0) > 0.01:
+        print(f"    Auto-scale TAU → .coo: {scale:.6g}")
+        # Scale TAU coords to .coo space
+        x_tau_s = x_tau * scale + (x_coo.min() - x_tau.min() * scale)
+        y_tau_s = y_tau * scale + (y_coo.min() - y_tau.min() * scale)
+    else:
+        x_tau_s = x_tau
+        y_tau_s = y_tau
+
+    # ── KDTree remap ──────────────────────────────────────────────────────────
+    tree = cKDTree(np.column_stack((x_tau_s, y_tau_s)))
     dists, tau_to_coo = tree.query(np.column_stack((x_coo, y_coo)))
 
     max_dist = dists.max()
     print(f"    Max mapping distance: {max_dist:.2e}")
     if max_dist > 1e-3:
-        print(f"    WARNING: large mapping distance — check mesh/coo compatibility")
+        print(f"    WARNING: large mapping distance — meshes may be incompatible")
 
-    # Build reverse map: tau_idx -> coo_idx
-    # tau_to_coo[i] = tau index nearest to coo node i
-    # We need coo index for each tau node in the triangles
     n_tau = len(x_tau)
     tau2coo = np.full(n_tau, -1, dtype=np.int64)
     tau2coo[tau_to_coo] = np.arange(len(x_coo))
 
-    # Remap triangles
-    tris_tau = triang_tau.triangles          # (n_tri, 3) in TAU indices
-    tris_coo = tau2coo[tris_tau]             # remap to coo indices
+    tris_tau = triang_tau.triangles
+    tris_coo = tau2coo[tris_tau]
 
-    # Drop triangles with unmapped nodes (-1)
-    valid = (tris_coo >= 0).all(axis=1)
+    valid    = (tris_coo >= 0).all(axis=1)
     tris_coo = tris_coo[valid]
     print(f"    Triangles: {len(tris_tau)} → {len(tris_coo)} valid after remap")
 
@@ -413,7 +455,15 @@ def read_pval(path, vars_to_plot):
         print(f"  Variables    : {sorted(avail)}")
         print()
 
-        for vname in vars_to_plot:
+        # Umag requires u and w — ensure they are loaded
+        _vars = list(vars_to_plot)
+        if 'Umag' in _vars:
+            if 'u' not in _vars: _vars.append('u')
+            if 'w' not in _vars: _vars.append('w')
+
+        for vname in _vars:
+            if vname == 'Umag':
+                continue   # computed after loop
             if vname not in VAR_MAP:
                 print(f"  [skip] Unknown variable '{vname}'. "
                       f"Valid names: {list(VAR_MAP.keys())}")
@@ -438,6 +488,19 @@ def read_pval(path, vars_to_plot):
 
             data[vname] = real_part + 1j * imag_part
 
+    # Compute Umag if requested
+    if 'Umag' in vars_to_plot:
+        compute_umag(data)
+        # Remove u/w if they weren't originally requested
+        for v in ['u', 'w']:
+            if v not in vars_to_plot and v in data:
+                del data[v]
+        if 'Umag' in data:
+            mag = data['Umag'].real
+            print(f"  [{'Umag':6s}]  "
+                  f"|mag|_max  = {mag.max():.3e}   "
+                  f"NaNs = {int(np.isnan(mag).sum())}   "
+                  f"zeros = {int((mag==0).sum())}/{gridpoints}")
     return gridpoints, data
 
 # ── mesh check ─────────────────────────────────────────────────────────────────
@@ -483,7 +546,8 @@ def check_mesh(x, y, triang=None, body_contour=None, mesh_quads=None, mesh_name=
 # ── colour-map helpers ─────────────────────────────────────────────────────────
 
 def symmetric_norm(data, pct=90):
-    vmax = float(np.nanpercentile(np.abs(data), pct))
+    nonzero = np.abs(data[data != 0]) if (data != 0).any() else np.abs(data)
+    vmax = float(np.nanpercentile(nonzero, pct))
     if vmax == 0:
         vmax = float(np.nanmax(np.abs(data)))
     if vmax == 0:
@@ -527,7 +591,8 @@ def build_triangulation(x, y):
 
 def plot_modes(x, y, mode_data, cmap, output_stem, title_prefix,
                triang=None, clim_pct=90, plot_imag=False, plot_both=False,
-               prefix=None, body_contour=None):
+               prefix=None, body_contour=None, eig_str='', omg_str='',
+               field_label=None, mode_idx=None):
     if not mode_data:
         print("  Nothing to plot.")
         return
@@ -559,11 +624,13 @@ def plot_modes(x, y, mode_data, cmap, output_stem, title_prefix,
             win_mask = ((x >= XLIM[0]) & (x <= XLIM[1]) &
                         (y >= YLIM[0]) & (y <= YLIM[1]))
             arr_win  = arr[win_mask] if win_mask.any() else arr
-            if prefix == 'sensitivity':
-                norm     = positive_norm(arr_win, pct=clim_pct)
-                cmap_use = 'Greys'
+            # Exclude exact zeros (domain-reduced nodes) from norm computation
+            arr_norm = arr_win[arr_win != 0] if (arr_win != 0).any() else arr_win
+            if prefix == 'sensitivity' or vname == 'Umag':
+                norm     = positive_norm(arr_norm, pct=clim_pct)
+                cmap_use = 'viridis' if vname == 'Umag' else 'Greys'
             else:
-                norm     = symmetric_norm(arr_win, pct=clim_pct)
+                norm     = symmetric_norm(arr_norm, pct=clim_pct)
                 cmap_use = cmap
             im = ax.tripcolor(triang, arr, cmap=cmap_use, norm=norm,
                               shading='gouraud', rasterized=True)
@@ -574,15 +641,17 @@ def plot_modes(x, y, mode_data, cmap, output_stem, title_prefix,
             ax.set_ylim(*YLIM)
             ax.set_aspect('equal', adjustable='box')
             add_colorbar(ax, im)
-            ax.set_title(f'{part_label}  {label}', fontsize=11, loc='left')
-            ax.set_xlabel('x', fontsize=9)
-            ax.set_ylabel('y', fontsize=9)
+            _flabel = field_label or SINGLE_PREFIX_LABEL.get(prefix, '')
+            _extra  = '   '.join(s for s in [eig_str, omg_str] if s)
+            _title_parts = [p for p in [_flabel, f'{part_label} {label}', _extra] if p]
+            _ax_title = ' - '.join(_title_parts)
+            if mode_idx is not None:
+                _ax_title += f' (mode {mode_idx})'
+            ax.set_title(_ax_title, fontsize=11, loc='left')
+            ax.set_xlabel('x/H', fontsize=9)
+            ax.set_ylabel('y/H', fontsize=9)
             ax.tick_params(labelsize=8)
 
-            circle = plt.Circle((0, 0), 0.25, color='w', clip_on=False)
-            ax.add_patch(circle)
-
-        fig.suptitle(f'{title_prefix}  —  {label}', fontsize=13, fontweight='bold')
         out = f'{output_stem}_{vname}{suffix}.png'
         fig.savefig(out, dpi=150, bbox_inches='tight')
         print(f"  Saved: {out}")
@@ -592,7 +661,7 @@ def plot_modes(x, y, mode_data, cmap, output_stem, title_prefix,
 
 def plot_resolvent(datasets, cmap, dir_path, idx_omega,
                    triang, clim_pct=90, plot_imag=False, plot_both=False,
-                   body_contour=None):
+                   body_contour=None, eig_str='', omg_str='', mode_idx=None):
     if not datasets:
         print("  Nothing to plot.")
         return
@@ -626,11 +695,12 @@ def plot_resolvent(datasets, cmap, dir_path, idx_omega,
                 win_mask = ((x >= XLIM[0]) & (x <= XLIM[1]) &
                             (y >= YLIM[0]) & (y <= YLIM[1]))
                 arr_win  = arr[win_mask] if win_mask.any() else arr
-                if prefix == 'sensitivity':
-                    norm     = positive_norm(arr_win, pct=clim_pct)
-                    cmap_use = 'Greys'
+                arr_norm = arr_win[arr_win != 0] if (arr_win != 0).any() else arr_win
+                if prefix == 'sensitivity' or vname == 'Umag':
+                    norm     = positive_norm(arr_norm, pct=clim_pct)
+                    cmap_use = 'viridis' if vname == 'Umag' else 'Greys'
                 else:
-                    norm     = symmetric_norm(arr_win, pct=clim_pct)
+                    norm     = symmetric_norm(arr_norm, pct=clim_pct)
                     cmap_use = cmap
                 im = ax.tripcolor(triang, arr, cmap=cmap_use, norm=norm,
                                   shading="gouraud", rasterized=True)
@@ -641,13 +711,16 @@ def plot_resolvent(datasets, cmap, dir_path, idx_omega,
                 ax.set_ylim(*YLIM)
                 ax.set_aspect("equal", adjustable="box")
                 add_colorbar(ax, im)
-                ax.set_title(f"{field_label}  {part_label}  {label}",
-                             fontsize=11, loc="left")
-                ax.set_xlabel("x", fontsize=9)
-                ax.set_ylabel("y", fontsize=9)
+                _extra = "   ".join(s for s in [eig_str, omg_str] if s)
+                _title_parts = [p for p in [field_label, f'{part_label} {label}', _extra] if p]
+                _ax_title = ' - '.join(_title_parts)
+                if mode_idx is not None:
+                    _ax_title += f' (mode {mode_idx})'
+                ax.set_title(_ax_title, fontsize=11, loc="left")
+                ax.set_xlabel("x/H", fontsize=9)
+                ax.set_ylabel("y/H", fontsize=9)
                 ax.tick_params(labelsize=8)
 
-            fig.suptitle(f"{field_label}  —  {label}", fontsize=13, fontweight="bold")
             out = os.path.join(dir_path,
                                f"{prefix}_{idx_omega}_{vname}{suffix}.png")
             fig.savefig(out, dpi=150, bbox_inches="tight")
@@ -655,6 +728,147 @@ def plot_resolvent(datasets, cmap, dir_path, idx_omega,
             plt.close(fig)
 
 # ── helpers ────────────────────────────────────────────────────────────────────
+
+def load_eigenvalues(search_dirs):
+    """
+    Load eigenvalues from eigv_DIR.dat or eigv_ADJ.dat.
+    Searches each directory in search_dirs in order.
+    Returns dict {index: complex} or empty dict if not found.
+    """
+    for d in search_dirs:
+        for fname in ('eigv_DIR.dat', 'eigv_ADJ.dat'):
+            path = os.path.join(d, fname)
+            if not os.path.isfile(path):
+                continue
+            eigs = {}
+            with open(path) as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        try:
+                            idx = int(parts[0])
+                            eigs[idx] = complex(float(parts[1]), float(parts[2]))
+                        except ValueError:
+                            pass
+            if eigs:
+                print(f"  Eigenvalues loaded from: {path} ({len(eigs)} modes)")
+                return eigs
+    return {}
+
+
+def omega_str(idx_omega):
+    """Extract omega value from idx_omega string like '0_4.102j' -> 'ω = 4.102'"""
+    parts = idx_omega.split('_', 1)
+    if len(parts) < 2:
+        return ''
+    omega_raw = parts[1].rstrip('j').rstrip('J')
+    try:
+        omega = float(omega_raw)
+        return f"ω = {omega:.5g}"
+    except ValueError:
+        return f"ω = {parts[1]}"
+
+
+def eigenvalue_str(eigs, idx):
+    """Format eigenvalue for title: [-\sigma_r, \sigma_i] = [val, val]"""
+    if idx not in eigs:
+        return ''
+    lam = eigs[idx]
+    return f"[$-\sigma_r, \sigma_i$] = [{-lam.real:.5g}, {lam.imag:.5g}]"
+
+
+def compute_umag(data_dict):
+    """Add Umag = sqrt(|u|^2 + |w|^2) to data_dict if u and w are present."""
+    if 'Umag' in data_dict:
+        return
+    u = data_dict.get('u')
+    w = data_dict.get('w')
+    if u is not None and w is not None:
+        data_dict['Umag'] = np.sqrt(np.abs(u)**2 + np.abs(w)**2).astype(np.complex128)
+    elif u is not None:
+        data_dict['Umag'] = np.abs(u).astype(np.complex128)
+
+
+def load_volumes(vol_path, neq, n_nodes):
+    """
+    Load cell volumes from samg.matrix.vol and expand to DOF-level diagonal
+    of mass matrix B.  Returns array of length n_nodes*neq.
+    """
+    with open(vol_path) as f:
+        vols = np.array([float(line) for line in f], dtype=np.float64)
+    # Repeat each volume neq times (one per DOF per node)
+    return np.repeat(vols[:n_nodes], neq)
+
+
+def compute_sensitivity(dir_data, adj_data, common, vol_path=None, neq=4):
+    """
+    Compute structural sensitivity S = |q_adj| * |q_dir| / |<q_adj, B q_dir>|
+    following Giannetti & Luchini (2007).
+
+    B is the diagonal mass matrix (cell volumes repeated neq times).
+    If vol_path is None, uses identity (no mass weighting).
+
+    The inner product is computed over all variables jointly (full DOF vector),
+    matching eig_simple.py which uses the full Jacobian-sized vectors.
+
+    Returns a data dict {'u': sens_array, 'w': sens_array} with real values.
+    """
+    # Build full DOF vectors for direct and adjoint modes
+    # Interleave variables: [rho_0, u_0, w_0, e_0, rho_1, u_1, ...]
+    var_order = [v for v in ['rho', 'u', 'w', 'e', 'turb1', 'turb2']
+                 if v in dir_data and v in adj_data]
+    if not var_order:
+        return {}
+
+    neq_actual = len(var_order)
+    n_nodes    = common
+
+    # Build interleaved arrays (node-major ordering)
+    qd_full = np.zeros(n_nodes * neq_actual, dtype=np.complex128)
+    qa_full = np.zeros(n_nodes * neq_actual, dtype=np.complex128)
+    for k, vname in enumerate(var_order):
+        qd_full[k::neq_actual] = dir_data[vname][:n_nodes]
+        qa_full[k::neq_actual] = adj_data[vname][:n_nodes]
+
+    # Mass matrix diagonal: volumes repeated neq times
+    if vol_path and os.path.isfile(vol_path):
+        b_diag = load_volumes(vol_path, neq_actual, n_nodes)
+        print(f"  [sensitivity] using mass matrix from {vol_path}")
+    else:
+        b_diag = np.ones(n_nodes * neq_actual, dtype=np.float64)
+        if vol_path:
+            print(f"  [sensitivity] vol file not found ({vol_path}), using identity")
+        else:
+            print(f"  [sensitivity] no vol file provided, using identity")
+
+    # <q_adj, B q_dir> = sum_i conj(qa_i) * b_i * qd_i
+    Bqd        = b_diag * qd_full
+    inner_prod = np.dot(np.conj(qa_full), Bqd)
+    norm_ip    = float(np.abs(inner_prod))
+    if norm_ip < 1e-30:
+        print("  [sensitivity] WARNING: inner product near zero, not normalising")
+        norm_ip = 1.0
+
+    print(f"  [sensitivity] |<q+, B q>| = {norm_ip:.4e}")
+
+    # Pointwise sensitivity: element-wise product of magnitudes / norm_ip
+    # This matches eig_simple.py exactly:
+    #   sensitivity = np.abs(adj_arr) * np.abs(dir_arr) / norm_ip
+    # where adj_arr/dir_arr are the full DOF vectors (size n_nodes*neq_actual)
+    # mode2pval stores the first gridpoints values -> DOF 0 of each node = rho
+    # read_pval reads var by var: rho=DOF0, u=DOF1, w=DOF2, e=DOF3 per node
+    s_dof = np.abs(qa_full) * np.abs(qd_full) / norm_ip  # (n_nodes*neq_actual,)
+
+    # Extract per-variable sensitivity matching read_pval's VAR_MAP ordering
+    # DOF ordering within each node: rho=0, u=1, w=2, e=3, turb1=4, turb2=5
+    var_dof = {v: k for k, v in enumerate(var_order)}
+    sens = {}
+    for vname in ['u', 'w']:
+        if vname in var_dof:
+            dof_idx = var_dof[vname]
+            sens[vname] = s_dof[dof_idx::neq_actual].astype(np.complex128)
+    return sens
+
 
 def vars_for_prefix(prefix, requested_vars):
     skip = SKIP_VARS_FOR.get(prefix, set())
@@ -723,7 +937,16 @@ def parse_args():
     p.add_argument('--jac', default='JAC',
                    help='Path to the JAC directory containing samg.matrix.coo '
                         '(default: JAC)')
-    p.add_argument('--neq', default=4, help='Number of equations in the system, equivalent to degrees of freedom per node. (default: 4)')
+    
+    p.add_argument('--neq', type=int, default=None,
+                   help='Number of equations per node in the .coo file '
+                        '(default: auto-detected from pval gridpoints). '
+                        'E.g. --neq 6 for SA turbulence models.')
+
+    p.add_argument('--neq', type=int, default=None,
+                   help='Number of equations per node in the .coo file '
+                        '(default: auto-detected from pval gridpoints). '
+                        'E.g. --neq 6 for SA turbulence models.')
 
     p.add_argument('--mesh', default=None,
                    help='TAU NetCDF mesh file. E.g. --mesh MESH/BFS_h4_2D.taumesh')
@@ -738,7 +961,7 @@ def parse_args():
 
     p.add_argument('--vars', nargs='+', default=['rho', 'u', 'w', 'e'],
                    help=f'Variables to plot (default: rho u w e). '
-                        f'Available: {list(VAR_MAP.keys())}')
+                        f'Available: {list(VAR_MAP.keys())} + Umag (computed)')
 
     p.add_argument('--fields', nargs='+',
                    choices=['eigf', 'eigr', 'eiga', 'sensitivity'],
@@ -794,7 +1017,39 @@ def main():
                 f"--mesh for a TAU mesh."
             )
     else:
-        x, y = load_coo(coords_path, neq=int(args.neq))
+        # Auto-detect neq from actual line count in .coo vs gridpoints
+        _neq = args.neq
+        if _neq is None:
+            # Get gridpoints from pval or vol file
+            _pval_path = (args.pval if args.pval else
+                          next(iter([fp for fp in [
+                              find_pval(args.dir, pfx, 0)
+                              for pfx, _ in ALL_PREFIXES] if fp]), None))
+            _gp = peek_pval_gridpoints(_pval_path) if _pval_path else None
+
+            # Also check .vol file (most reliable)
+            _vol_path = os.path.join(args.jac, 'samg.matrix.vol')
+            if os.path.isfile(_vol_path):
+                with open(_vol_path) as _fv:
+                    _gp_vol = sum(1 for _ in _fv)
+                if _gp is None or _gp_vol == _gp:
+                    _gp = _gp_vol
+
+            if _gp:
+                # Count actual data lines in .coo
+                with open(coords_path) as _f:
+                    _f.readline()   # skip header
+                    _nlines = sum(1 for _ in _f)
+                # Pick neq so that _nlines // neq == _gp
+                for _n in [4, 5, 6, 7, 8]:
+                    if _nlines // _n == _gp:
+                        _neq = _n
+                        break
+            if _neq is None:
+                _neq = 4   # fallback
+            if _neq != 4:
+                print(f"  Auto-detected neq = {_neq}")
+        x, y = load_coo(coords_path, neq=_neq)
 
     # Load TAU mesh for triangulation and body contour (optional)
     if args.mesh is not None:
@@ -807,6 +1062,32 @@ def main():
         elif len(x) != len(x_tau) or not np.allclose(x[:5], x_tau[:5], atol=1e-6):
             # .coo and TAU have different ordering — remap triangulation
             mesh_triang = _remap_triangulation(x, y, x_tau, y_tau, mesh_triang)
+
+            # Scale body contour from TAU coords to .coo coords
+            if body_contour:
+                range_coo_x = x.max() - x.min()
+                range_tau_x = x_tau.max() - x_tau.min()
+                range_coo_y = y.max() - y.min()
+                range_tau_y = y_tau.max() - y_tau.min()
+                sx = range_coo_x / range_tau_x if range_tau_x > 0 else 1.0
+                sy = range_coo_y / range_tau_y if range_tau_y > 0 else 1.0
+                scale = (sx + sy) / 2.0 if abs(sx - sy) / max(sx, 1e-10) < 0.01 else 1.0
+                if abs(scale - 1.0) > 0.01:
+                    ox = x.min() - x_tau.min() * scale
+                    oy = y.min() - y_tau.min() * scale
+                    scaled = []
+                    for bc in body_contour:
+                        bc_s = bc.copy()
+                        bc_s[:, 0] = bc[:, 0] * scale + ox
+                        bc_s[:, 1] = bc[:, 1] * scale + oy
+                        scaled.append(bc_s)
+                    body_contour = scaled
+                    print(f"  Body contour scaled by {scale:.6g} to .coo space")
+            # If remap failed (too few valid triangles), fall back to Delaunay
+            if mesh_triang is not None and len(mesh_triang.triangles) < len(x) // 10:
+                print(f"  WARNING: remap produced only {len(mesh_triang.triangles)} triangles "
+                      f"— TAU mesh likely incompatible with .coo. Falling back to Delaunay.")
+                mesh_triang = None
 
     # ── 2. set x limits ────────────────────────────────────────────────────────
     if args.xlim is not None:
@@ -833,7 +1114,13 @@ def main():
         print("Done.\n")
         return
 
-    # ── 4. detect resolvent directory ─────────────────────────────────────────
+    # ── 3b. load eigenvalues ──────────────────────────────────────────────────
+    # Also search in the directory containing the .pval file
+    _pval_dir = os.path.dirname(os.path.abspath(args.pval)) if args.pval else None
+    _search   = [d for d in [args.dir, _pval_dir, args.jac, '.'] if d]
+    eigenvalues = load_eigenvalues(_search)
+
+    # ── 4. detect resolvent directory ─────────────────────────────────────────────
     resolvent = is_resolvent_dir(args.dir)
     if resolvent:
         print(f"  Resolvent directory detected — plotting all available fields.")
@@ -861,9 +1148,27 @@ def main():
             )
     elif args.pval is not None:
         if not os.path.isfile(args.pval):
-            print_usage_and_exit(f".pval file not found: '{args.pval}'")
-        work_list = [args.pval]
-        resolvent = False
+            # If sensitivity file missing, try to compute from eigf + eiga
+            fname_base = os.path.basename(args.pval)
+            if fname_base.startswith('sensitivity_'):
+                # Extract index from filename: sensitivity_181.pval -> 181
+                _stem  = os.path.splitext(fname_base)[0]  # sensitivity_181
+                _parts = _stem.split('_', 1)
+                _idx_s = _parts[1] if len(_parts) > 1 else None
+                _dir_s = os.path.dirname(args.pval) or '.'
+                _eigf  = find_pval(_dir_s, 'eigf', _idx_s) if _idx_s else None
+                _eiga  = find_pval(_dir_s, 'eiga', _idx_s) if _idx_s else None
+                if _eigf and _eiga:
+                    print(f"  sensitivity file not found — will compute from eigf + eiga")
+                    work_list  = [('__compute_sensitivity__', _eigf, _eiga, _idx_s)]
+                    resolvent  = False
+                else:
+                    print_usage_and_exit(f".pval file not found: '{args.pval}'")
+            else:
+                print_usage_and_exit(f".pval file not found: '{args.pval}'")
+        else:
+            work_list = [args.pval]
+            resolvent = False
     else:
         print_usage_and_exit("provide a .pval file or use --modes.")
 
@@ -874,6 +1179,47 @@ def main():
     for item in work_list:
 
         if not resolvent:
+            # ── special: compute sensitivity on-the-fly ────────────────────────
+            if isinstance(item, tuple) and item[0] == '__compute_sensitivity__':
+                _, _eigf_path, _eiga_path, _idx_s = item
+                print(f"\n── Computing sensitivity from eigf + eiga ──────────────────")
+                _vars_d = vars_for_prefix('eigf', args.vars)
+                _vars_a = vars_for_prefix('eiga', args.vars)
+                gridpoints, dir_data = read_pval(_eigf_path, _vars_d)
+                _,          adj_data = read_pval(_eiga_path, _vars_a)
+                common = min(len(x), gridpoints)
+                xi, yi = x[:common], y[:common]
+                dir_data = truncate(dir_data, common)
+                adj_data = truncate(adj_data, common)
+                _vol_path = os.path.join(args.jac, 'samg.matrix.vol')
+                forc_data = compute_sensitivity(dir_data, adj_data, common,
+                                                vol_path=_vol_path)
+                if not forc_data:
+                    print("  [skip] Could not compute sensitivity.")
+                    continue
+                if cached_n_nodes != common:
+                    if mesh_triang is not None:
+                        if len(mesh_triang.x) != common:
+                            valid = (mesh_triang.triangles < common).all(axis=1)
+                            t_trim = mesh_triang.triangles[valid]
+                            cached_triang = tri.Triangulation(xi, yi, t_trim)
+                        else:
+                            cached_triang = mesh_triang
+                    else:
+                        cached_triang = build_triangulation(xi, yi)
+                    cached_n_nodes = common
+                out_stem = os.path.splitext(os.path.abspath(args.pval))[0]
+                title    = os.path.basename(args.pval)
+                _midx    = int(_idx_s) if _idx_s and _idx_s.isdigit() else None
+                _eig_s   = eigenvalue_str(eigenvalues, _midx) if _midx is not None else ''
+                print(f"\n── Plotting ────────────────────────────────────────────────────")
+                plot_modes(xi, yi, forc_data, 'RdBu', out_stem, title,
+                           triang=cached_triang, clim_pct=args.clim,
+                           plot_imag=args.imag, plot_both=args.both,
+                           prefix='sensitivity', body_contour=body_contour,
+                           eig_str=_eig_s, mode_idx=_midx)
+                continue
+
             forc_path   = item
             fname_base  = os.path.basename(forc_path)
             file_prefix = next((p for p, _ in ALL_PREFIXES
@@ -903,13 +1249,21 @@ def main():
                 else:
                     cached_triang = build_triangulation(xi, yi)
                 cached_n_nodes = common
-            out_stem = os.path.splitext(os.path.abspath(forc_path))[0]
-            title    = os.path.basename(forc_path)
+            out_stem   = os.path.splitext(os.path.abspath(forc_path))[0]
+            fname_stem = os.path.splitext(os.path.basename(forc_path))[0]
+            # Extract mode index from filename: eigf_3_1.2j -> 3
+            _parts = fname_stem.split('_')
+            _midx  = int(_parts[1]) if len(_parts) > 1 and _parts[1].lstrip('-').isdigit() else None
+            _eig_s = eigenvalue_str(eigenvalues, _midx) if _midx is not None else ''
+            title  = f"{os.path.basename(forc_path)}   {_eig_s}" if _eig_s else os.path.basename(forc_path)
             print(f"\n── Plotting ────────────────────────────────────────────────────")
+            # Extract omega from filename if present (e.g. eigf_0_1.2j.pval)
+            _omg_s_sf = omega_str('_'.join(_parts[1:])) if len(_parts) > 2 else ''
             plot_modes(xi, yi, forc_data, 'RdBu', out_stem, title,
                        triang=cached_triang, clim_pct=args.clim,
                        plot_imag=args.imag, plot_both=args.both,
-                       prefix=file_prefix, body_contour=body_contour)
+                       prefix=file_prefix, body_contour=body_contour,
+                       eig_str=_eig_s, omg_str=_omg_s_sf, mode_idx=_midx)
             continue
 
         # ── resolvent mode ─────────────────────────────────────────────────────
@@ -960,13 +1314,16 @@ def main():
             print(f"  [skip] No data loaded for index {idx}.")
             continue
 
+        _eig_s = eigenvalue_str(eigenvalues, idx)
+        _omg_s = omega_str(idx_omega)
         print(f"\n── Plotting ────────────────────────────────────────────────────")
         plot_resolvent(datasets, 'RdBu',
                        dir_path=os.path.abspath(args.dir),
                        idx_omega=idx_omega,
                        triang=cached_triang, clim_pct=args.clim,
                        plot_imag=args.imag, plot_both=args.both,
-                       body_contour=body_contour)
+                       body_contour=body_contour,
+                       eig_str=_eig_s, omg_str=_omg_s, mode_idx=idx)
 
     print("Done.\n")
 

@@ -40,6 +40,10 @@ Usage: python plot_gain_curve.py [OPTIONS]
     python plot_gain_curve.py --dirs RESULTS_re1 RESULTS_re2 RESULTS_re3 \\
                               --labels "Re=1000" "Re=2000" "Re=3000"
 
+  If --labels is omitted and directory names share a common prefix,
+  labels are automatically set to the differing suffix only.
+  e.g. RESULTS_resolvent_h1_ncv_100  ->  h1_ncv_100
+
 Options:
   --dirs DIR [DIR ...]  One or more directories with eigv_DIR_*.dat files
   --labels STR [...]    Legend label for each directory (optional)
@@ -49,9 +53,19 @@ Options:
 
 multi = len(args.dirs) > 1
 
-# Default labels: basename of each directory
-labels = args.labels if args.labels else \
-         [os.path.basename(os.path.normpath(d)) for d in args.dirs]
+# ---------------------------------------------------------------------------
+# Automatic labels: strip RESULTS_resolvent_ prefix
+# ---------------------------------------------------------------------------
+PREFIX = "RESULTS_resolvent_"
+
+def auto_label(directory):
+    name = os.path.basename(os.path.normpath(directory))
+    return name[len(PREFIX):] if name.startswith(PREFIX) else name
+
+if args.labels:
+    labels = args.labels
+else:
+    labels = [auto_label(d) for d in args.dirs]
 
 if len(labels) != len(args.dirs):
     raise ValueError("--labels must have the same number of entries as --dirs")
@@ -152,8 +166,7 @@ else:
         arrowprops=dict(arrowstyle="->", color="tomato", lw=0.8),
     )
 
-    default_out = os.path.join(directory, args.output if args.output else "gain_curve.png")
-    outpath = default_out
+    outpath = args.output if args.output else os.path.join(directory, "gain_curve.png")
 
     # Print summary table
     print(f"\n{'omega':>20}  {'lambda_1^2':>18}  {'lambda_2^2':>18}")
@@ -163,13 +176,13 @@ else:
         l2 = gain_matrix[i, 1] if n_modes_max > 1 else float("nan")
         print(f"{om:>20.6f}  {l1:>18.6e}  {l2:>18.6e}")
 
-ax.set_xlabel(r"$\omega,\;(Im(\lambda))$", fontsize=13)
-ax.set_ylabel(r"$\lambda_1^2\,(\omega)$", fontsize=13)
+ax.set_xlabel(r"$\omega$", fontsize=13)
+ax.set_ylabel(r"$\sigma_1^2\,(\omega)$", fontsize=13)
 ax.set_title("Resolvent optimal gain", fontsize=12)
 ax.grid(True, which="both", ls="--", alpha=0.35)
 ax.set_xlim(left=0)
-ax.xaxis.set_major_locator(matplotlib.ticker.MultipleLocator(0.5))
-ax.xaxis.set_minor_locator(matplotlib.ticker.MultipleLocator(0.25))
+ax.xaxis.set_major_locator(matplotlib.ticker.MultipleLocator(1))
+ax.xaxis.set_minor_locator(matplotlib.ticker.MultipleLocator(0.5))
 
 fig.tight_layout()
 fig.savefig(outpath, dpi=150)
