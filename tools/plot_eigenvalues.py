@@ -128,7 +128,7 @@ def plot_eigenvalues(datasets, figsize=(13, 10), dpi=150,
 
 def parse_args():
     p = argparse.ArgumentParser(description="Visualiza autovalores en el plano complejo.")
-    p.add_argument("ficheros", nargs="+",
+    p.add_argument("--ficheros", nargs="+",
                    help="Uno o varios ficheros .dat (índice  Re  Im)")
     p.add_argument("--figsize", nargs=2, type=float, default=[13, 10],
                    metavar=("W", "H"))
