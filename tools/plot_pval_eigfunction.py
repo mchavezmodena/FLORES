@@ -105,7 +105,7 @@ VAR_MAP = {
     'u':     ('u',     'u_i'),
     'w':     ('w',     'w_i'),
     'e':     ('e',     'e_i'),
-    'v':     ('v',     None),
+    'v':     ('v',     'v_i'),
     'turb1': ('turb1', 'turb1_i'),
     'turb2': ('turb2', 'turb2_i'),
 }
@@ -578,6 +578,9 @@ def plot_modes(x, y, mode_data, cmap, output_stem, title_prefix,
             ax.set_xlabel('x', fontsize=9)
             ax.set_ylabel('y', fontsize=9)
             ax.tick_params(labelsize=8)
+
+            circle = plt.Circle((0, 0), 0.25, color='w', clip_on=False)
+            ax.add_patch(circle)
 
         fig.suptitle(f'{title_prefix}  —  {label}', fontsize=13, fontweight='bold')
         out = f'{output_stem}_{vname}{suffix}.png'
