@@ -60,6 +60,52 @@ def open_sod2d_jacobian(jacfile):
 
     return mjac, neq
 
+def open_split_sod2d_jacobian(jacfiles):
+    # read from SOD2D's WIP hdf format
+    # uses the "split parallel" format where multiple hdfs contain a single matrix
+
+    sorted_files = sorted(jacfiles)
+
+    nnz = 0
+    num_cols = 0
+    for jacfile in jacfiles:
+    
+        f = h5py.File(jacfile,'r')
+        nnz += f['col_ptr'][-1]
+        num_cols += len(f['col_ptr'][:])-1 # TODO might fail
+        f.close()
+
+    col_ptr = np.zeros(num_cols,dtype=np.int32)
+    row_ind = np.zeros(nnz,dtype=np.int32)
+    values = np.zeros(nnz,dtype=np.float64)
+    coords = np.zeros(num_cols//5,dtype=np.float64) # TODO might be wrong
+
+    previous_col = 0
+    current_col = 0
+    previous_nnz = 0
+    current_nnz = 0
+    for jacfile in jacfiles:
+    
+        f = h5py.File(jacfile,'r')
+        current_nnz = previous_nnz + f['col_ptr'][-1]
+        current_col = previous_col+len(f['col_ptr'][:])-1
+        col_ptr[previous_col:current_col-1] = previous_nnz + f['col_ptr'][:]
+        row_ind[previous_nnz:current_nnz-1] = f['row_ind'][:]
+        values[previous_nnz:current_nnz-1] = f['values'][:]
+        coords[previous_col//5:current_col//5] = f['node_coords'][:]
+
+        f.close()
+
+    n = len(col_ptr)-1
+    numpoints = np.shape(coords)[0]
+
+    neq = n/numpoints # number of eqs = number of degrees of freedom / number of nodes
+
+    mjac = csc_matrix((values,row_ind,col_ptr))
+    mjac = mjac.tocsr()
+    mjac.eliminate_zeros()
+
+    return mjac, neq
 
 # -------------------------------------------------------------------- #
 
